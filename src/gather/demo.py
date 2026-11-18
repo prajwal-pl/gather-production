@@ -13,6 +13,7 @@ import argparse
 import json
 import sys
 from datetime import date, timedelta
+from pathlib import Path
 
 from .config import ROOT, Settings, load_settings
 from .domain import task_fingerprint
@@ -20,7 +21,7 @@ from .graphs import resume_meeting, run_inbox, run_meeting
 from .runtime import Runtime, build_runtime
 from .workers import sweep
 
-DEMO_DB = ROOT / ".gather" / "demo.db"
+DEMO_DIR = ROOT / ".gather"
 
 
 def rule(label: str) -> None:
@@ -76,12 +77,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--live", action="store_true", help="use Groq/OpenRouter from .env")
     parser.add_argument("--keep", action="store_true", help="keep the demo database")
     parser.add_argument("--auto-approve", action="store_true", help="skip the human gate")
+    parser.add_argument("--data-dir", help="put the demo database in this directory")
     args = parser.parse_args(argv)
 
-    if DEMO_DB.exists() and not args.keep:
-        DEMO_DB.unlink()
+    demo_dir = Path(args.data_dir).expanduser() if args.data_dir else DEMO_DIR
+    demo_db = demo_dir / "demo.db"
+    demo_checkpoints = demo_dir / "demo-checkpoints.db"
 
-    settings: Settings = load_settings(db_path=DEMO_DB, auto_approve=args.auto_approve)
+    if not args.keep:
+        for path in (demo_db, demo_checkpoints):
+            for suffix in ("", "-wal", "-shm"):
+                Path(f"{path}{suffix}").unlink(missing_ok=True)
+
+    settings: Settings = load_settings(
+        data_dir=demo_dir,
+        db_path=demo_db,
+        checkpoints_path=demo_checkpoints,
+        auto_approve=args.auto_approve,
+    )
     if args.live and settings.fixture_mode:
         print("No provider keys found. Set GROQ_API_KEY and/or OPENROUTER_API_KEY in .env.")
         return 1
@@ -182,7 +195,8 @@ def main(argv: list[str] | None = None) -> int:
     pending = rt.store.proposals(org)
     print(f"\n  pending proposals: {len(pending)}")
     print(f"  model usage: {rt.llm.usage.as_dict()}")
-    print(f"\n  inspect: GATHER_DB={DEMO_DB} python -m gather.serve")
+    print(f"\n  inspect: gather --data-dir {demo_dir} serve")
+    rt.close()
     return 0
 
 

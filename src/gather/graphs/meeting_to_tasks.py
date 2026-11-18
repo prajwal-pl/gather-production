@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Annotated, Any, TypedDict
 
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Send, interrupt
 
@@ -66,7 +65,12 @@ class MeetingState(TypedDict, total=False):
     candidate: dict
 
 
-def build_meeting_graph(deps: Deps, *, checkpointer: Any | None = None):
+def build_meeting_graph(deps: Deps, *, checkpointer: Any):
+    """Compile the graph against a durable checkpointer.
+
+    There is deliberately no in-memory default: a pending approval that dies
+    with the process is a data-loss bug, not a testing convenience.
+    """
     store = deps.store
 
     # -- nodes ------------------------------------------------------------- #
@@ -306,7 +310,7 @@ def build_meeting_graph(deps: Deps, *, checkpointer: Any | None = None):
     graph.add_edge("persist", "notify")
     graph.add_edge("notify", END)
 
-    return graph.compile(checkpointer=checkpointer or InMemorySaver())
+    return graph.compile(checkpointer=checkpointer)
 
 
 def run_meeting(

@@ -4,16 +4,21 @@ import json
 import sqlite3
 import threading
 import uuid
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
 from .domain import Event, EventKind, Meeting, Message, TaskStatus
 
-SCHEMA = """
-PRAGMA journal_mode=WAL;
-PRAGMA foreign_keys=ON;
+@dataclass(frozen=True, slots=True)
+class Migration:
+    version: int
+    name: str
+    sql: str
 
+
+BASELINE_V1 = """
 CREATE TABLE IF NOT EXISTS organizations (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -142,6 +147,73 @@ CREATE TABLE IF NOT EXISTS proposals (
 CREATE INDEX IF NOT EXISTS idx_proposals_org_status ON proposals (org_id, status);
 """
 
+CONNECTION_SCHEDULING_V2 = """
+ALTER TABLE connections ADD COLUMN last_sync_at TEXT;
+ALTER TABLE connections ADD COLUMN next_sync_at TEXT;
+ALTER TABLE connections ADD COLUMN backoff_until TEXT;
+ALTER TABLE connections ADD COLUMN error_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE connections ADD COLUMN last_error TEXT;
+CREATE INDEX IF NOT EXISTS idx_connections_due
+    ON connections (org_id, status, next_sync_at);
+"""
+
+# Forward-only. Never edit a shipped migration; append a new one.
+# v1 is idempotent on purpose: databases created before versioning existed have
+# all of these tables but report user_version = 0.
+MIGRATIONS: tuple[Migration, ...] = (
+    Migration(1, "baseline", BASELINE_V1),
+    Migration(2, "connection_scheduling", CONNECTION_SCHEDULING_V2),
+)
+
+LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
+
+
+class MigrationError(RuntimeError):
+    pass
+
+
+def schema_version(con: sqlite3.Connection) -> int:
+    return int(con.execute("PRAGMA user_version").fetchone()[0])
+
+
+def apply_migrations(
+    con: sqlite3.Connection, migrations: tuple[Migration, ...] = MIGRATIONS
+) -> int:
+    """Run pending migrations in one transaction each.
+
+    ``executescript`` commits before it runs, so the transaction is written
+    explicitly inside the script. DDL and the version bump therefore land
+    together or not at all.
+    """
+    version = schema_version(con)
+    latest = migrations[-1].version if migrations else 0
+    if version > latest:
+        raise MigrationError(
+            f"database schema v{version} is newer than this build ({latest}); "
+            "update gather instead of downgrading"
+        )
+    for migration in migrations:
+        if migration.version <= version:
+            continue
+        script = (
+            "BEGIN IMMEDIATE;\n"
+            f"{migration.sql}\n"
+            f"PRAGMA user_version = {migration.version};\n"
+            "COMMIT;"
+        )
+        try:
+            con.executescript(script)
+        except Exception as exc:  # noqa: BLE001 - re-raised with context
+            try:
+                con.execute("ROLLBACK")
+            except sqlite3.OperationalError:
+                pass
+            raise MigrationError(
+                f"migration {migration.version} ({migration.name}) failed: {exc}"
+            ) from exc
+        version = migration.version
+    return version
+
 
 def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
@@ -167,10 +239,19 @@ class Store:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self.con = sqlite3.connect(str(self.path), check_same_thread=False)
+        self.con = sqlite3.connect(str(self.path), check_same_thread=False, timeout=5.0)
         self.con.row_factory = sqlite3.Row
-        self.con.executescript(SCHEMA)
+        # PRAGMAs that cannot run inside a migration transaction.
+        self.con.execute("PRAGMA journal_mode=WAL")
+        self.con.execute("PRAGMA synchronous=NORMAL")
+        self.con.execute("PRAGMA foreign_keys=ON")
+        self.con.execute("PRAGMA busy_timeout=5000")
+        apply_migrations(self.con)
         self.con.commit()
+
+    @property
+    def schema_version(self) -> int:
+        return schema_version(self.con)
 
     # -- low level --------------------------------------------------------- #
 
@@ -278,6 +359,53 @@ class Store:
 
     def set_cursor(self, connection_id: str, cursor: str) -> None:
         self._write("UPDATE connections SET cursor = ? WHERE id = ?", (cursor, connection_id))
+
+    def due_connections(self, org_id: str, now: str, limit: int = 10) -> list[dict]:
+        """Active connections whose next poll is due and which are not backing off."""
+        rows = self._rows(
+            "SELECT * FROM connections WHERE org_id = ? AND status = 'active' "
+            "AND (next_sync_at IS NULL OR next_sync_at <= ?) "
+            "AND (backoff_until IS NULL OR backoff_until <= ?) "
+            "ORDER BY COALESCE(next_sync_at, '') LIMIT ?",
+            (org_id, now, now, limit),
+        )
+        for row in rows:
+            row["scopes"] = json.loads(row.get("scopes") or "[]")
+        return rows
+
+    def mark_sync_success(
+        self,
+        connection_id: str,
+        *,
+        cursor: str | None,
+        next_sync_at: str,
+        synced_at: str,
+    ) -> None:
+        self._write(
+            "UPDATE connections SET cursor = COALESCE(?, cursor), last_sync_at = ?, "
+            "next_sync_at = ?, backoff_until = NULL, error_count = 0, last_error = NULL "
+            "WHERE id = ?",
+            (cursor, synced_at, next_sync_at, connection_id),
+        )
+
+    def mark_sync_failure(
+        self,
+        connection_id: str,
+        *,
+        error: str,
+        next_sync_at: str,
+        backoff_until: str,
+        status: str | None = None,
+    ) -> None:
+        self._write(
+            "UPDATE connections SET error_count = error_count + 1, last_error = ?, "
+            "next_sync_at = ?, backoff_until = ?, status = COALESCE(?, status) "
+            "WHERE id = ?",
+            (error[:500], next_sync_at, backoff_until, status, connection_id),
+        )
+
+    def set_connection_status(self, connection_id: str, status: str) -> None:
+        self._write("UPDATE connections SET status = ? WHERE id = ?", (status, connection_id))
 
     # -- events ------------------------------------------------------------ #
 

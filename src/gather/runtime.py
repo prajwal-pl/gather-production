@@ -7,8 +7,10 @@ checkpoint held by that compiled graph instance.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable
 
+from .checkpoints import Checkpoints
 from .config import Settings, load_settings
 from .connectors import CapabilityHub, FirefliesConnector, GmailConnector
 from .db import Store
@@ -29,6 +31,32 @@ class Runtime:
     meeting_graph: Any
     inbox_graph: Any
     org_id: str
+    checkpoints: Checkpoints
+
+    def close(self) -> None:
+        self.store.close()
+        self.checkpoints.close()
+
+    def poll_once(self, *, now: datetime | None = None) -> list:
+        """Run one polling tick for this workspace.
+
+        The scheduler thread (Phase 3) will call this on a timer; the CLI and
+        the dev API call it once for testing.
+        """
+        from .poller import PollSource, process_event
+
+        poller = PollSource(
+            self.store,
+            self.hub,
+            on_event=lambda event: process_event(self, event),
+        )
+        return poller.run_once(self.org_id, now=now)
+
+    def __enter__(self) -> "Runtime":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
 
 def build_runtime(
@@ -39,28 +67,37 @@ def build_runtime(
 ) -> Runtime:
     settings = settings or load_settings()
     store = Store(settings.db_path)
-    llm = build_llm(settings, log=log, force_fixture=force_fixture)
-    hub = CapabilityHub(store)
+    checkpoints = Checkpoints(settings.checkpoints_path)
+    try:
+        llm = build_llm(settings, log=log, force_fixture=force_fixture)
+        hub = CapabilityHub(store)
 
-    fireflies = FirefliesConnector()
-    gmail = GmailConnector()
-    hub.register(fireflies)
-    hub.register(gmail)
+        fireflies = FirefliesConnector()
+        gmail = GmailConnector()
+        hub.register(fireflies)
+        hub.register(gmail)
 
-    notifier = Notifier(settings, log=log)
-    meeting_graph = build_meeting_graph(
-        Deps(
-            store=store,
-            llm=llm,
-            hub=hub,
-            notifier=notifier,
-            fireflies=fireflies,
-            settings=settings,
+        notifier = Notifier(settings, log=log)
+        meeting_graph = build_meeting_graph(
+            Deps(
+                store=store,
+                llm=llm,
+                hub=hub,
+                notifier=notifier,
+                fireflies=fireflies,
+                settings=settings,
+            ),
+            checkpointer=checkpoints.saver,
         )
-    )
-    inbox_graph = build_inbox_graph(
-        InboxDeps(store=store, llm=llm, hub=hub, notifier=notifier, settings=settings)
-    )
+        inbox_graph = build_inbox_graph(
+            InboxDeps(store=store, llm=llm, hub=hub, notifier=notifier, settings=settings),
+            checkpointer=checkpoints.saver,
+        )
+        org_id = store.ensure_org(settings.org_name)
+    except Exception:
+        checkpoints.close()
+        store.close()
+        raise
 
     return Runtime(
         settings=settings,
@@ -72,5 +109,6 @@ def build_runtime(
         gmail=gmail,
         meeting_graph=meeting_graph,
         inbox_graph=inbox_graph,
-        org_id=store.ensure_org(settings.org_name),
+        org_id=org_id,
+        checkpoints=checkpoints,
     )

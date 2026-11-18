@@ -6,6 +6,7 @@ No prompts, no orchestration, no tenancy decisions.
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, Mapping, Protocol
 
@@ -35,18 +36,55 @@ class Connection(BaseModel):
     cursor: str | None = None
     status: str = "active"
     expires_at: str | None = None
+    # Scheduling state, owned by the poller.
+    last_sync_at: str | None = None
+    next_sync_at: str | None = None
+    backoff_until: str | None = None
+    error_count: int = 0
+    last_error: str | None = None
+
+
+class SyncError(RuntimeError):
+    """A sync failed in a way the poller should back off from."""
+
+    def __init__(self, message: str, *, retry_after_s: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_s = retry_after_s
+
+
+class AuthExpired(SyncError):
+    """The credential is dead; retrying will not help until the user reauths."""
+
+
+class RateLimited(SyncError):
+    """The provider asked us to slow down. ``retry_after_s`` may be set."""
+
+
+def retry_after_seconds(raw: str | None, default: float = 60.0) -> float:
+    try:
+        return max(1.0, float(raw or ""))
+    except (TypeError, ValueError):
+        return default
 
 
 class Connector(Protocol):
     provider: str
     capabilities: frozenset[Capability]
+    #: How often the poller should call ``sync`` for this provider.
+    poll_interval_s: int
+    #: Whether the provider can push (webhook/Socket Mode). Polling works regardless.
+    push_capable: bool
 
     def parse_webhook(self, headers: Mapping[str, str], body: bytes) -> list[Event]:
         """Normalize a provider delivery. ``org_id`` is filled in by the edge."""
         ...
 
     def sync(self, conn: Connection, limit: int = 50) -> SyncBatch:
-        """Cursor-based pull, used for backfill and gap repair."""
+        """Cursor-based pull. This is the desktop ingestion path."""
+        ...
+
+    def backfill(self, conn: Connection, since: datetime, limit: int = 50) -> SyncBatch:
+        """First connect and cursor-expiry repair. Bounded by the caller."""
         ...
 
     def execute(self, conn: Connection, capability: Capability, args: dict[str, Any]) -> Any:

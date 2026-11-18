@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
 import httpx
 
 from ..domain import Event, EventKind, Meeting, ObjectRef, Person, SyncBatch
-from .base import Capability, Connection
+from .base import (
+    AuthExpired,
+    Capability,
+    Connection,
+    RateLimited,
+    SyncError,
+    retry_after_seconds,
+)
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures"
 
@@ -27,6 +34,24 @@ query Transcript($id: String!) {
 }
 """.strip()
 
+_LIST_TRANSCRIPTS_QUERY = """
+query Transcripts($from: DateTime, $to: DateTime, $limit: Int, $skip: Int) {
+  transcripts(fromDate: $from, toDate: $to, limit: $limit, skip: $skip) {
+    id
+    title
+    date
+    duration
+    participants
+  }
+}
+""".strip()
+
+_MAX_PAGES = 40
+_BACKFILL_DAYS = 14
+# Transcripts can land hours after the meeting; rescan a day and let dedupe
+# absorb the repeats.
+_OVERLAP = timedelta(hours=24)
+
 
 class FirefliesConnector:
     """Fireflies delivers a thin notification, then you fetch the transcript.
@@ -38,6 +63,8 @@ class FirefliesConnector:
 
     provider = "fireflies"
     capabilities = frozenset({Capability.GET_TRANSCRIPT})
+    poll_interval_s = 600
+    push_capable = True
 
     def __init__(
         self,
@@ -78,7 +105,75 @@ class FirefliesConnector:
     # -- sync -------------------------------------------------------------- #
 
     def sync(self, conn: Connection, limit: int = 50) -> SyncBatch:
-        return SyncBatch(events=[], cursor=conn.cursor, has_more=False)
+        """List transcripts in the window since the cursor.
+
+        A transcript can arrive hours after the meeting ends, so the window
+        overlaps by a day and dedupe does the rest.
+        """
+        if not self.api_key:
+            return SyncBatch(events=[], cursor=conn.cursor)
+
+        now = datetime.now(timezone.utc)
+        start = _cursor_time(conn.cursor)
+        if start is None:
+            start = now - timedelta(days=_BACKFILL_DAYS)
+        else:
+            start = max(start - _OVERLAP, now - timedelta(days=_BACKFILL_DAYS))
+        if start >= now:
+            return SyncBatch(events=[], cursor=_iso(now))
+        return self._window(conn, start, now, limit)
+
+    def backfill(self, conn: Connection, since: datetime, limit: int = 50) -> SyncBatch:
+        if not self.api_key:
+            return SyncBatch(events=[], cursor=conn.cursor)
+        return self._window(conn, since, datetime.now(timezone.utc), limit)
+
+    def _window(
+        self, conn: Connection, start: datetime, end: datetime, limit: int
+    ) -> SyncBatch:
+        page_size = max(1, min(limit, 50))
+        skip = 0
+        events: list[Event] = []
+
+        for _ in range(_MAX_PAGES):
+            data = self._query(
+                _LIST_TRANSCRIPTS_QUERY,
+                {"from": _iso(start), "to": _iso(end), "limit": page_size, "skip": skip},
+            )
+            if "transcripts" not in data:
+                # Never advance the cursor on a malformed/empty GraphQL envelope.
+                raise SyncError("fireflies transcript list was missing from the response")
+            rows = data.get("transcripts") or []
+            for row in rows:
+                meeting_id = str(row.get("id") or "")
+                if not meeting_id:
+                    continue
+                stamp = row.get("date")
+                revision = str(int(stamp)) if isinstance(stamp, (int, float)) else "v1"
+                events.append(
+                    Event(
+                        id=f"fireflies:{meeting_id}:{revision}",
+                        provider=self.provider,
+                        kind=EventKind.MEETING_COMPLETED,
+                        occurred_at=_parse_dt(stamp) or end,
+                        subject=ObjectRef(
+                            provider=self.provider, id=meeting_id, kind="meeting"
+                        ),
+                        payload={
+                            "meeting_id": meeting_id,
+                            "date": stamp,
+                            "title": row.get("title"),
+                        },
+                    )
+                )
+            if len(rows) < page_size:
+                break
+            skip += len(rows)
+        else:
+            # Never silently drop a window: surface it and keep the old cursor.
+            raise SyncError("fireflies transcript window is too large; run a narrower backfill")
+
+        return SyncBatch(events=events, cursor=_iso(end))
 
     # -- capability -------------------------------------------------------- #
 
@@ -95,17 +190,33 @@ class FirefliesConnector:
         return self._to_meeting(org_id, external_id, raw)
 
     def _graphql(self, external_id: str) -> dict[str, Any]:
+        data = self._query(_TRANSCRIPT_QUERY, {"id": external_id})
+        return data.get("transcript") or {}
+
+    def _query(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
         response = httpx.post(
             self.endpoint,
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            json={"query": _TRANSCRIPT_QUERY, "variables": {"id": external_id}},
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"query": query, "variables": variables},
             timeout=60,
         )
+        if response.status_code == 429:
+            raise RateLimited(
+                "fireflies rate limit",
+                retry_after_s=retry_after_seconds(
+                    (response.headers or {}).get("retry-after")
+                ),
+            )
+        if response.status_code in (401, 403):
+            raise AuthExpired(f"fireflies auth failed ({response.status_code})")
         response.raise_for_status()
         body = response.json()
         if body.get("errors"):
-            raise RuntimeError(f"fireflies graphql error: {body['errors']}")
-        return (body.get("data") or {}).get("transcript") or {}
+            raise SyncError(f"fireflies graphql error: {body['errors']}")
+        return body.get("data") or {}
 
     def _fixture(self) -> dict[str, Any]:
         path = self.fixture_dir / "fireflies_meeting.json"
@@ -166,3 +277,17 @@ def _parse_dt(value: Any) -> datetime | None:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _cursor_time(cursor: str | None) -> datetime | None:
+    if not cursor:
+        return None
+    try:
+        parsed = datetime.fromisoformat(cursor.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)

@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, TypedDict
 
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from ..agents.classify import classify_reply
@@ -60,7 +59,7 @@ def _tokens(text: str) -> set[str]:
     }
 
 
-def build_inbox_graph(deps: InboxDeps, *, checkpointer: Any | None = None):
+def build_inbox_graph(deps: InboxDeps, *, checkpointer: Any):
     store = deps.store
 
     def load(state: InboxState) -> dict:
@@ -206,7 +205,7 @@ def build_inbox_graph(deps: InboxDeps, *, checkpointer: Any | None = None):
     graph.add_edge("match", "classify")
     graph.add_edge("classify", "apply")
     graph.add_edge("apply", END)
-    return graph.compile(checkpointer=checkpointer or InMemorySaver())
+    return graph.compile(checkpointer=checkpointer)
 
 
 def run_inbox(graph, *, org_id: str, message: Message, thread_id: str | None = None) -> dict:

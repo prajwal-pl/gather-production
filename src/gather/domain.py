@@ -150,6 +150,8 @@ class SyncBatch(BaseModel):
     events: list[Event] = Field(default_factory=list)
     cursor: str | None = None
     has_more: bool = False
+    # The provider rejected the cursor (Gmail 404). The poller must backfill.
+    reset: bool = False
 
 
 class Proposal(BaseModel):

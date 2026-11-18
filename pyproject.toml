@@ -5,17 +5,25 @@ description = "Meeting-to-task follow-up agent: connectors, canonical events, La
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "fastapi>=0.164.0",
-    "langchain>=1.5.0",
+    "httpx>=0.28.0",
     "langchain-groq>=1.1.3",
     "langchain-openrouter>=0.2.9",
     "langgraph>=1.2.22",
+    "langgraph-checkpoint-sqlite>=2.0.0",
+    "pydantic>=2.0",
+]
+
+# Development / headless only. The desktop engine does not import these.
+[project.scripts]
+gather = "gather.cli:main"
+
+[dependency-groups]
+dev = [
+    "fastapi>=0.164.0",
+    "pytest>=8.0.0",
     "python-dotenv>=1.2.4",
     "uvicorn[standard]>=0.54.0",
 ]
-
-[dependency-groups]
-dev = ["pytest>=8.0.0"]
 
 [build-system]
 requires = ["hatchling"]

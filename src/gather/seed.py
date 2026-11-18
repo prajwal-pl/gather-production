@@ -40,6 +40,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     print(f"org: {org}")
+    print(f"dir: {settings.data_dir}")
     print(f"db:  {settings.db_path}")
     print("\ntry:")
     print(
@@ -48,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         '-d \'{"event":"meeting.transcribed","meetingId":"ff_9f3a2c"}\''
     )
     print("  curl localhost:8000/proposals")
+    store.close()
     return 0
 
 

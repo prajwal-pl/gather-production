@@ -9,11 +9,23 @@ system of record, and nothing leaves the building without approval.
 
 ```bash
 uv sync
-python -m gather.demo          # offline, deterministic, no accounts
-python -m gather.demo --live   # real Groq / OpenRouter keys from .env
-python -m gather.check         # probe each free model in your chain
-python -m gather.seed          # org + demo members, so `serve` is usable
-python -m gather.serve         # webhook + approval API on :8000
+uv run gather demo          # offline, deterministic, no accounts
+uv run gather demo --live   # real Groq / OpenRouter keys from .env
+uv run gather check         # probe each free model in your chain
+uv run gather seed          # org + demo members, so `serve` is usable
+uv run gather sync          # poll every due connection once
+uv run gather serve         # webhook + approval API on :8000 (development)
+```
+
+`--data-dir <path>` works before or after the subcommand. Without it, state
+goes to the OS app-data directory (`~/.local/share/gather` on Linux,
+`~/Library/Application Support/gather` on macOS, `%APPDATA%\gather` on
+Windows). `GATHER_DB` remains a single-file development override.
+
+```
+<data-dir>/
+  gather.db            # tasks, meetings, events, proposals
+  checkpoints.db       # paused graph runs / pending approvals
 ```
 
 Verified against the keys in this workspace (Nov 2026):
@@ -27,15 +39,17 @@ Verified against the keys in this workspace (Nov 2026):
 ## The spine
 
 ```
-Fireflies ──► parse_webhook ──► dedupe(raw_events) ──► meeting graph
-                                                        │
-                          load ─► extract ─► resolve ─► fan-out enrich
-                                                        │
-                                              review [interrupt]
-                                                        │ approve
-                                              persist ─► notify
-Gmail ─────► parse_webhook ──► inbox graph: load ─► match ─► classify ─► apply
-cron ──────────────────────► scheduler: overdue ─► draft nudge ─► proposal
+Fireflies ──► poll (transcripts) ──► dedupe(raw_events) ──► meeting graph
+                                                              │
+                            load ─► extract ─► resolve ─► fan-out enrich
+                                                              │
+                                                    review [interrupt]
+                                                              │ approve
+                                                    persist ─► notify
+Gmail ─────► poll (historyId) ─────► inbox graph: load ─► match ─► classify ─► apply
+cron ──────────────────────────────► scheduler: overdue ─► draft nudge ─► proposal
+
+webhooks ──► development/relay only (GATHER_INGRESS=http)
 ```
 
 Every node before `review` is bookkeeping. Only `extract`, `classify` and
@@ -46,9 +60,13 @@ Every node before `review` is bookkeeping. Only `extract`, `classify` and
 | Claim | Where it is proven |
 |---|---|
 | Webhooks are idempotent | `raw_events` unique key; retry suppressed in demo step 1 |
+| Polling is safe to retry | cursor advances only after dispatch; a failure backs off and replays |
+| A stale Gmail cursor repairs itself | 404 → `reset` → bounded backfill |
 | Long transcripts fit small contexts | `chunk_transcript` in `agents/extract.py` |
 | Free models can be held to structure | JSON prompt + validate + one repair, `llm.py` |
-| A run can pause for a human and resume | `interrupt()` + checkpointer, demo step 2 |
+| A run can pause for a human and resume | `interrupt()` + `checkpoints.db`, demo step 2 |
+| An approval survives a restart | `tests/test_durability.py::test_pending_approval_survives_a_restart` |
+| Schema upgrades are forward-only | `PRAGMA user_version` runner, `test_migrations_apply_in_order_and_only_once` |
 | Duplicate tasks are not created | fingerprint + near-duplicate check, demo step 2 |
 | External attendees are not assigned internal tasks | `resolve_owner`, test asserts `external_owner` |
 | Replies update state without a human | `inbox_monitor` graph, demo step 4 |
@@ -57,7 +75,7 @@ Every node before `review` is bookkeeping. Only `extract`, `classify` and
 | Providers are interchangeable | `CapabilityHub` + `Connector` protocol |
 
 ```
-tests/test_spine.py ......... 7 passed
+tests/  38 passed
 ```
 
 ## Why free models are enough here
@@ -86,8 +104,11 @@ current free list and put the exact id in `.env`.
 src/gather/
   domain.py            canonical objects + deterministic helpers
   llm.py               provider chain, JSON repair, offline fixture model
-  db.py                schema + repository (org-scoped)
+  db.py                schema, migrations + repository (org-scoped)
+  checkpoints.py       durable LangGraph checkpoints (SQLite)
+  cli.py               `gather` entry point
   connectors/          base protocol, fireflies.py, gmail.py
+  poller/              poll.py (schedule/sync/backoff), dispatch.py (event → graph)
   agents/              extract.py, classify.py, draft.py   ← only LLM call sites
   graphs/              meeting_to_tasks.py, inbox_monitor.py
   workers/scheduler.py overdue sweep + renewal report
@@ -102,7 +123,10 @@ leaked.
 ## API
 
 ```bash
-# Fireflies-shaped delivery (fixture mode returns the bundled meeting)
+# Ask the poller to run now (development convenience)
+curl -X POST localhost:8000/sync
+
+# Fireflies-shaped delivery (development/relay only, GATHER_INGRESS=http)
 curl -X POST localhost:8000/webhooks/fireflies/<org_id> \
      -H 'content-type: application/json' \
      -d '{"event":"meeting.transcribed","meetingId":"ff_9f3a2c"}'
@@ -131,17 +155,29 @@ edge and approval queue.
 The connector HTTP paths are implemented but need your `FIREFLIES_API_KEY` and
 a Gmail token to exercise.
 
+**Polling, not webhooks:** a desktop app has no public URL, so ingestion is
+pull-based. Fireflies is listed by date window (14-day first backfill, 24-hour
+overlap, dedupe on `meeting_id + date`). Gmail walks `users.history.list` from
+its `historyId`; a 404 triggers a bounded backfill. Connections carry their own
+schedule (`next_sync_at`), retry with capped exponential backoff, and stop on a
+dead credential (`reauth_required`) instead of hammering it. Webhook routes
+still exist for development or a relay, gated by `GATHER_INGRESS=http`.
+
 **Deliberately not built yet:** Google OAuth token refresh, Pub/Sub
 subscription renewal, Slack app install, Postgres/RLS, vector search, and
 Drive/Calendar/Teams connectors.
 
 ## Production swap list
 
-1. SQLite → Postgres, with RLS on `org_id` and the same repository methods.
-2. `InMemorySaver` → `PostgresSaver` so approvals survive a restart.
-3. Inline background tasks → a real queue (or LangGraph Platform).
-4. Fixtures → live Fireflies GraphQL and Gmail `history.list`.
-5. Add `sync()` gap repair + subscription renewal to the scheduler.
+1. Inline background tasks → the in-process scheduler thread (Phase 3).
+2. Token renewal for Google OAuth (refresh tokens in the keychain).
+3. `.env` keys → the OS keychain.
+4. `api.py` → the stdio IPC adapter (HTTP stays as a headless dev mode).
+5. Ollama, so the app still works offline.
+
+Done already: durable `SqliteSaver` checkpoints, a versioned schema, real
+Fireflies/Gmail polling with cursor repair and backoff, and an ingress switch
+that keeps webhooks out of the desktop path.
 
 ## Next connectors
 

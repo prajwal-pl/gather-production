@@ -12,10 +12,19 @@ from typing import Any, Mapping
 import httpx
 
 from ..domain import Event, EventKind, Message, ObjectRef, SyncBatch
-from .base import Capability, Connection
+from .base import (
+    AuthExpired,
+    Capability,
+    Connection,
+    RateLimited,
+    SyncError,
+    retry_after_seconds,
+)
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures"
 API = "https://gmail.googleapis.com/gmail/v1/users/me"
+_MAX_HISTORY_PAGES = 20
+_MAX_BACKFILL_PAGES = 20
 
 _QUOTE_MARKERS = (
     re.compile(r"^On .+ wrote:$", re.IGNORECASE),
@@ -33,6 +42,8 @@ class GmailConnector:
 
     provider = "gmail"
     capabilities = frozenset({Capability.SEARCH_MESSAGES, Capability.SEND_MESSAGE})
+    poll_interval_s = 120
+    push_capable = True
 
     def __init__(
         self,
@@ -77,33 +88,129 @@ class GmailConnector:
     # -- sync -------------------------------------------------------------- #
 
     def sync(self, conn: Connection, limit: int = 50) -> SyncBatch:
+        """Walk ``users.history.list`` from the stored historyId.
+
+        Gmail's history window is finite. A 404 means the cursor is too old to
+        continue, so the poller is told to backfill rather than silently skip.
+        """
         token = self._token(conn)
-        if not token or not conn.cursor:
-            return SyncBatch(events=[], cursor=conn.cursor, has_more=False)
+        if not token:
+            return SyncBatch(events=[], cursor=conn.cursor)
+        if not conn.cursor:
+            return SyncBatch(events=[], cursor=None, reset=True)
+
+        cursor = conn.cursor
+        page_token: str | None = None
+        events: list[Event] = []
+        seen: set[str] = set()
+
+        for _ in range(_MAX_HISTORY_PAGES):
+            params: dict[str, Any] = {
+                "startHistoryId": cursor,
+                "historyTypes": "messageAdded",
+                "maxResults": max(1, min(limit, 500)),
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            response = httpx.get(
+                f"{API}/history",
+                headers={"Authorization": f"Bearer {token}"},
+                params=params,
+                timeout=30,
+            )
+            if response.status_code == 404:
+                return SyncBatch(events=[], cursor=None, reset=True)
+            _check(response)
+
+            body = response.json()
+            cursor = str(body.get("historyId") or cursor)
+            for record in body.get("history", []):
+                for item in record.get("messagesAdded", []):
+                    message_id = (item.get("message") or {}).get("id")
+                    if not message_id or message_id in seen:
+                        continue
+                    seen.add(message_id)
+                    events.append(
+                        Event(
+                            id=f"gmail:{message_id}",
+                            provider=self.provider,
+                            kind=EventKind.MESSAGE_RECEIVED,
+                            occurred_at=datetime.now(timezone.utc),
+                            payload={"message_id": message_id},
+                        )
+                    )
+            page_token = body.get("nextPageToken")
+            if not page_token:
+                break
+        else:
+            raise SyncError("gmail history pagination did not finish; try again later")
+
+        return SyncBatch(events=events, cursor=cursor)
+
+    def backfill(self, conn: Connection, since: datetime, limit: int = 100) -> SyncBatch:
+        """List recent messages, then set the cursor to the current historyId.
+
+        The profile is read *before* the listing so messages that arrive during
+        the backfill are picked up by the next history sync (overlap is deduped).
+        """
+        token = self._token(conn)
+        if not token:
+            return SyncBatch(events=[], cursor=conn.cursor)
+
+        cursor = self._profile(token)
+        query = f"after:{int(since.timestamp())} -in:sent"
+        page_token: str | None = None
+        events: list[Event] = []
+        seen: set[str] = set()
+
+        for _ in range(_MAX_BACKFILL_PAGES):
+            params: dict[str, Any] = {
+                "q": query,
+                "maxResults": max(1, min(limit, 500)),
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            response = httpx.get(
+                f"{API}/messages",
+                headers={"Authorization": f"Bearer {token}"},
+                params=params,
+                timeout=30,
+            )
+            _check(response)
+            body = response.json()
+            for item in body.get("messages", []):
+                message_id = item.get("id")
+                if not message_id or message_id in seen:
+                    continue
+                seen.add(message_id)
+                events.append(
+                    Event(
+                        id=f"gmail:{message_id}",
+                        provider=self.provider,
+                        kind=EventKind.MESSAGE_RECEIVED,
+                        occurred_at=datetime.now(timezone.utc),
+                        payload={"message_id": message_id},
+                    )
+                )
+            page_token = body.get("nextPageToken")
+            if not page_token:
+                break
+        else:
+            raise SyncError("gmail backfill pagination did not finish; try again later")
+
+        return SyncBatch(events=events, cursor=cursor)
+
+    def _profile(self, token: str) -> str:
         response = httpx.get(
-            f"{API}/history",
+            f"{API}/profile",
             headers={"Authorization": f"Bearer {token}"},
-            params={"startHistoryId": conn.cursor, "historyTypes": "messageAdded", "maxResults": limit},
             timeout=30,
         )
-        if response.status_code == 404:
-            # Cursor too old: Gmail tells you to resync from scratch.
-            return SyncBatch(events=[], cursor=None, has_more=False)
-        response.raise_for_status()
-        body = response.json()
-        next_cursor = str(body.get("historyId") or conn.cursor)
-        events = [
-            Event(
-                id=f"gmail:{item['message']['id']}",
-                provider=self.provider,
-                kind=EventKind.MESSAGE_RECEIVED,
-                occurred_at=datetime.now(timezone.utc),
-                payload={"message_id": item["message"]["id"]},
-            )
-            for record in body.get("history", [])
-            for item in record.get("messagesAdded", [])
-        ]
-        return SyncBatch(events=events, cursor=next_cursor, has_more=bool(body.get("nextPageToken")))
+        _check(response)
+        history_id = response.json().get("historyId")
+        if not history_id:
+            raise SyncError("gmail profile did not return a historyId")
+        return str(history_id)
 
     # -- capability -------------------------------------------------------- #
 
@@ -180,7 +287,7 @@ class GmailConnector:
             params={"q": query, "maxResults": limit},
             timeout=30,
         )
-        response.raise_for_status()
+        _check(response)
         hits: list[dict[str, Any]] = []
         for item in response.json().get("messages", [])[:limit]:
             meta = httpx.get(
@@ -236,7 +343,7 @@ class GmailConnector:
             json=payload,
             timeout=30,
         )
-        response.raise_for_status()
+        _check(response)
         return {"sent": True, "id": response.json().get("id"), "dry_run": False}
 
     # -- internals --------------------------------------------------------- #
@@ -255,7 +362,7 @@ class GmailConnector:
             params={"format": "full"},
             timeout=30,
         )
-        response.raise_for_status()
+        _check(response)
         body = response.json()
         headers = {
             header["name"].lower(): header["value"]
@@ -291,6 +398,19 @@ class GmailConnector:
             body_text=strip_quoted(raw.get("body_text", "")),
             sent_at=_parse_date(raw.get("sent_at")),
         )
+
+
+def _check(response: Any) -> None:
+    """Turn provider status codes into poller-level failures."""
+    status = getattr(response, "status_code", 200)
+    if status == 401:
+        raise AuthExpired("gmail credential expired or was revoked")
+    if status == 429:
+        headers = getattr(response, "headers", {}) or {}
+        raise RateLimited(
+            "gmail rate limit", retry_after_s=retry_after_seconds(headers.get("retry-after"))
+        )
+    response.raise_for_status()
 
 
 def _b64decode(value: str) -> str:

@@ -5,78 +5,11 @@ from datetime import date
 import pytest
 
 from gather.agents.extract import chunk_transcript, merge_commitments
-from gather.config import load_settings
-from gather.connectors import CapabilityHub, FirefliesConnector, GmailConnector
-from gather.db import Store
-from gather.domain import Commitment, parse_due_date, task_fingerprint
-from gather.graphs import (
-    Deps,
-    InboxDeps,
-    build_inbox_graph,
-    build_meeting_graph,
-    resume_meeting,
-    run_inbox,
-    run_meeting,
-)
-from gather.llm import FixtureLLM, extract_json
-from gather.notify import Notifier
+from gather.domain import Commitment, parse_due_date
+from gather.graphs import resume_meeting, run_inbox, run_meeting
+from gather.llm import extract_json
 
 TODAY = date(2026, 11, 17)
-
-
-@pytest.fixture()
-def env(tmp_path):
-    settings = load_settings(db_path=tmp_path / "test.db", auto_approve=False)
-    store = Store(settings.db_path)
-    llm = FixtureLLM(today=TODAY, log=lambda _: None)
-    hub = CapabilityHub(store)
-    fireflies = FirefliesConnector()
-    gmail = GmailConnector()
-    hub.register(fireflies)
-    hub.register(gmail)
-    notifier = Notifier(settings, log=lambda _: None)
-
-    org = store.ensure_org("Acme")
-    priya = store.add_user(org, "priya@acme.test", "Priya Raman")
-    store.add_user(org, "marcus@acme.test", "Marcus Lee")
-    store.upsert_connection(org, "fireflies", mode="org")
-    store.upsert_connection(org, "gmail", mode="user", user_id=priya)
-
-    title = "Send updated pricing deck to Northwind"
-    seeded = store.create_task(
-        org,
-        title=title,
-        owner_user_id=priya,
-        owner_email="priya@acme.test",
-        due_date="2026-11-16",
-        fingerprint=task_fingerprint("priya@acme.test", title),
-    )
-
-    meeting_graph = build_meeting_graph(
-        Deps(
-            store=store,
-            llm=llm,
-            hub=hub,
-            notifier=notifier,
-            fireflies=fireflies,
-            settings=settings,
-            today=TODAY,
-        )
-    )
-    inbox_graph = build_inbox_graph(
-        InboxDeps(
-            store=store, llm=llm, hub=hub, notifier=notifier, settings=settings, today=TODAY
-        )
-    )
-    return dict(
-        store=store,
-        org=org,
-        priya=priya,
-        seeded=seeded,
-        meeting_graph=meeting_graph,
-        inbox_graph=inbox_graph,
-        gmail=gmail,
-    )
 
 
 def test_extract_json_recovers_from_fences_and_prose():

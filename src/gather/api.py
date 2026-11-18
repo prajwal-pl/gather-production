@@ -14,9 +14,10 @@ import hashlib
 import hmac
 import json
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, FastAPI, HTTPException, Request
 
 from . import __version__
 from .config import Settings
@@ -63,7 +64,15 @@ async def _json_body(request: Request) -> dict[str, Any]:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     rt = build_runtime(settings)
-    app = FastAPI(title="gather", version=__version__)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        try:
+            yield
+        finally:
+            rt.close()
+
+    app = FastAPI(title="gather", version=__version__, lifespan=lifespan)
     app.state.rt = rt
     org_id = rt.org_id
 
@@ -87,9 +96,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "usage": rt.llm.usage.as_dict(),
         }
 
-    # -- inbound webhooks -------------------------------------------------- #
+    # -- polling ----------------------------------------------------------- #
 
-    @app.post("/webhooks/fireflies/{org}", status_code=202)
+    @app.post("/sync", status_code=202)
+    def sync_now(background: BackgroundTasks) -> dict[str, Any]:
+        """Poll every due connection. Development convenience; the engine ticks."""
+        background.add_task(rt.poll_once)
+        return {"accepted": True}
+
+    # -- inbound webhooks (development / relay only) ----------------------- #
+
+    webhooks = APIRouter()
+
+    @webhooks.post("/webhooks/fireflies/{org}", status_code=202)
     async def fireflies_webhook(
         org: str, request: Request, background: BackgroundTasks
     ) -> dict[str, Any]:
@@ -114,7 +133,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return {"accepted": len(threads), "threads": threads}
 
-    @app.post("/webhooks/gmail/{org}", status_code=202)
+    @webhooks.post("/webhooks/gmail/{org}", status_code=202)
     async def gmail_webhook(
         org: str, request: Request, background: BackgroundTasks
     ) -> dict[str, Any]:
@@ -133,7 +152,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             background.add_task(_process_inbox, rt, org, event.payload)
         return {"accepted": accepted}
 
-    @app.post("/webhooks/slack")
+    @webhooks.post("/webhooks/slack")
     async def slack_webhook(request: Request) -> dict[str, Any]:
         body = await request.body()
         secret = rt.settings.slack_signing_secret
@@ -161,6 +180,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return {"ok": True, "task_id": task_id}
 
         return {"ok": True}
+
+    if rt.settings.ingress == "http":
+        app.include_router(webhooks)
 
     # -- approvals --------------------------------------------------------- #
 
