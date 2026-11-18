@@ -1,0 +1,30 @@
+{
+  "id": "ff_9f3a2c",
+  "title": "Acme x Northwind — pricing sync",
+  "date": "2026-11-17T10:00:00Z",
+  "duration": 32,
+  "participants": [
+    {"name": "Priya Raman", "email": "priya@acme.test"},
+    {"name": "Marcus Lee", "email": "marcus@acme.test"},
+    {"name": "Dana Whitfield", "email": "dana@northwind.test"}
+  ],
+  "sentences": [
+    {"speaker_name": "Marcus Lee", "text": "Thanks everyone for hopping on. Goal today is to close the pricing questions before Northwind's procurement review."},
+    {"speaker_name": "Dana Whitfield", "text": "Appreciate it. We are still targeting a signature before the end of the quarter."},
+    {"speaker_name": "Priya Raman", "text": "I'll send the updated pricing deck to Northwind by Friday."},
+    {"speaker_name": "Marcus Lee", "text": "Perfect. I'll book the security review with Dana for next Tuesday."},
+    {"speaker_name": "Dana Whitfield", "text": "I can share our procurement checklist by Monday."},
+    {"speaker_name": "Marcus Lee", "text": "We should probably think about packaging tiers at some point."},
+    {"speaker_name": "Priya Raman", "text": "I already sent the deck to legal yesterday, so that part is done."},
+    {"speaker_name": "Marcus Lee", "text": "Can you update the CRM with the new contacts?"},
+    {"speaker_name": "Priya Raman", "text": "I'll update the CRM with the new contacts by tomorrow."},
+    {"speaker_name": "Marcus Lee", "text": "I'll send the recap to Dana by Friday."},
+    {"speaker_name": "Dana Whitfield", "text": "That works. One flag: legal may push back on the annual uplift."},
+    {"speaker_name": "Marcus Lee", "text": "So I'll send the recap to Dana by Friday, with the uplift options called out."},
+    {"speaker_name": "Priya Raman", "text": "Sounds good. Anything else before we wrap?"},
+    {"speaker_name": "Dana Whitfield", "text": "Nothing from me. Talk soon."}
+  ],
+  "summary": {
+    "overview": "Pricing alignment with Northwind ahead of their procurement review; deck, security review, and CRM updates were assigned."
+  }
+}

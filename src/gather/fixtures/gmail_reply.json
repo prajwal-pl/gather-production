@@ -1,0 +1,10 @@
+{
+  "external_id": "msg_18f2a",
+  "thread_id": "thr_9c31",
+  "from_email": "priya@acme.test",
+  "from_name": "Priya Raman",
+  "to_emails": ["marcus@acme.test"],
+  "subject": "Re: Pricing deck for Northwind",
+  "sent_at": "2026-11-18T09:12:00+00:00",
+  "body_text": "Hi Marcus,\n\nSmall change of plan. Legal wants another pass on the annual uplift, so the deck is pushed to Monday. Nothing else moves.\n\nBest,\nPriya\n\nOn Tue, Nov 17, 2026 at 10:00 AM Marcus Lee <marcus@acme.test> wrote:\n> Can you get the deck over to Northwind by Friday?\n> Thanks"
+}
