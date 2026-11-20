@@ -72,8 +72,16 @@ def build_runtime(
         llm = build_llm(settings, log=log, force_fixture=force_fixture)
         hub = CapabilityHub(store)
 
-        fireflies = FirefliesConnector()
-        gmail = GmailConnector()
+        if force_fixture:
+            fireflies = FirefliesConnector(api_key="")
+            gmail = GmailConnector(access_token="")
+        else:
+            fireflies = FirefliesConnector()
+            gmail = GmailConnector(
+                client_id=settings.google_client_id or None,
+                client_secret=settings.google_client_secret or None,
+                refresh_token=settings.gmail_refresh_token or None,
+            )
         hub.register(fireflies)
         hub.register(gmail)
 

@@ -159,6 +159,30 @@ def test_gmail_sync_without_a_cursor_requests_a_backfill(monkeypatch):
     assert batch.cursor is None
 
 
+def test_gmail_mints_a_token_from_the_refresh_token_without_a_static_one(monkeypatch):
+    """OAuth-only setups start with no access token; ``_token`` must mint one."""
+    posts: list[dict] = []
+
+    def fake_post(url, data=None, timeout=None):
+        posts.append(data or {})
+        return FakeResponse({"access_token": "minted", "expires_in": 3600})
+
+    fake_get, _ = _gmail_get({})
+    monkeypatch.setattr(
+        gmail_module, "httpx", SimpleNamespace(get=fake_get, post=fake_post)
+    )
+
+    connector = GmailConnector(
+        client_id="cid", client_secret="secret", refresh_token="refresh"
+    )
+    conn = Connection(id="c1", org_id="o1", provider="gmail")
+    assert connector._token(conn) == "minted"
+    assert posts[0]["grant_type"] == "refresh_token"
+    # The minted token is cached until it expires.
+    assert connector._token(conn) == "minted"
+    assert len(posts) == 1
+
+
 def test_gmail_sync_dedupes_history_and_advances_the_cursor(monkeypatch):
     def history(params):
         assert params["startHistoryId"] == "100"

@@ -73,7 +73,7 @@ class FirefliesConnector:
         fixture_dir: Path | None = None,
         endpoint: str = "https://api.fireflies.ai/graphql",
     ) -> None:
-        self.api_key = api_key or os.environ.get("FIREFLIES_API_KEY")
+        self.api_key = api_key if api_key is not None else os.environ.get("FIREFLIES_API_KEY")
         self.fixture_dir = fixture_dir or FIXTURE_DIR
         self.endpoint = endpoint
 

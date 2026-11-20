@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import re
+import time
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
@@ -23,6 +24,7 @@ from .base import (
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures"
 API = "https://gmail.googleapis.com/gmail/v1/users/me"
+TOKEN_URL = "https://oauth2.googleapis.com/token"
 _MAX_HISTORY_PAGES = 20
 _MAX_BACKFILL_PAGES = 20
 
@@ -49,10 +51,46 @@ class GmailConnector:
         self,
         *,
         access_token: str | None = None,
+        client_id: str | None = None,
+        client_secret: str | None = None,
+        refresh_token: str | None = None,
         fixture_dir: Path | None = None,
     ) -> None:
         self.access_token = access_token
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.refresh_token = refresh_token
         self.fixture_dir = fixture_dir or FIXTURE_DIR
+        self._token_expires_at: float = 0
+
+    def _refresh_access_token(self) -> str | None:
+        """Refresh the access token using the refresh token."""
+        if not (self.client_id and self.client_secret and self.refresh_token):
+            return None
+        data = {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "refresh_token": self.refresh_token,
+            "grant_type": "refresh_token",
+        }
+        response = httpx.post(TOKEN_URL, data=data, timeout=30)
+        if response.status_code != 200:
+            raise AuthExpired(f"failed to refresh token: {response.text}")
+        body = response.json()
+        self.access_token = body["access_token"]
+        expires_in = body.get("expires_in", 3600)
+        self._token_expires_at = time.time() + expires_in - 60  # 60s buffer
+        return self.access_token
+
+    def _ensure_valid_token(self) -> str | None:
+        """Get a valid access token, refreshing if necessary."""
+        # If we have a static access token (no OAuth refresh configured), use it directly
+        if self.access_token and not (self.client_id and self.client_secret and self.refresh_token):
+            return self.access_token
+        # If we have OAuth config, check expiry and refresh if needed
+        if self.access_token and time.time() < self._token_expires_at:
+            return self.access_token
+        return self._refresh_access_token()
 
     # -- webhook ----------------------------------------------------------- #
 
@@ -349,9 +387,19 @@ class GmailConnector:
     # -- internals --------------------------------------------------------- #
 
     def _token(self, conn: Connection) -> str | None:
+        # First check for per-connection secret_ref (env var name)
         if conn.secret_ref and os.environ.get(conn.secret_ref):
             return os.environ[conn.secret_ref]
-        return self.access_token or os.environ.get("GMAIL_ACCESS_TOKEN")
+        # Then check connector-level credentials. With OAuth config we can mint
+        # an access token from the refresh token even when we start with none.
+        if self.access_token or (self.client_id and self.client_secret and self.refresh_token):
+            return self._ensure_valid_token()
+        # Then check env for raw access token
+        env_token = os.environ.get("GMAIL_ACCESS_TOKEN")
+        if env_token:
+            self.access_token = env_token
+            return self._ensure_valid_token()
+        return None
 
     def _fetch_message(self, conn: Connection, message_id: str) -> Message:
         token = self._token(conn)

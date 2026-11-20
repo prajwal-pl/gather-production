@@ -325,7 +325,7 @@ What exists today, honestly assessed.
 | `connectors/base.py` | capability/hub design is provider-agnostic |
 | `workers/scheduler.py` | becomes the in-process tick body |
 | `fixtures/` | offline demo + CI; also the app's "sample workspace" |
-| `tests/` | 38 passing tests; keep and extend |
+| `tests/` | 39 passing tests; keep and extend |
 
 ### 6.2 Change (server-shaped)
 

@@ -34,7 +34,6 @@ Verified against the keys in this workspace (Nov 2026):
 |---|---|
 | `groq:openai/gpt-oss-120b` | ~1.2s |
 | `openrouter:nvidia/nemotron-3.5-lightning:free` | ~3.5s |
-| `openrouter:inclusionai/ling-3.2-flash:free` | ~2.4s |
 
 ## The spine
 
@@ -75,7 +74,7 @@ Every node before `review` is bookkeeping. Only `extract`, `classify` and
 | Providers are interchangeable | `CapabilityHub` + `Connector` protocol |
 
 ```
-tests/  38 passed
+tests/  39 passed
 ```
 
 ## Why free models are enough here
@@ -87,8 +86,8 @@ The design deliberately keeps the model on a short leash:
 2. **Structured output + validation.** If a free model wraps JSON in prose or
    code fences, `extract_json` recovers it; if the schema does not validate,
    one repair call runs, then the node degrades instead of crashing.
-3. **A fallback chain.** Groq → Groq small → OpenRouter free. A 429 on one
-   provider rolls to the next.
+3. **A fallback chain.** Groq → OpenRouter free. A 429 on one provider rolls
+   to the next.
 4. **Call budget per run.** `GATHER_MAX_CALLS` stops a runaway retry loop.
 5. **Pacing.** `GATHER_MIN_INTERVAL` respects free-tier tokens-per-minute.
 6. **Deterministic work stays deterministic.** Dedupe, ownership, due-date
@@ -146,14 +145,15 @@ made.
 
 ## What is mocked, and what is real
 
-**Real and exercised here:** the model chain (Groq + two OpenRouter free
-models), JSON recovery and validation, chunking, graph orchestration,
+**Real and exercised here:** the model chain (Groq + one OpenRouter free
+model), JSON recovery and validation, chunking, graph orchestration,
 interrupt/resume, task state machine, ownership resolution, scheduler, the HTTP
-edge and approval queue.
+edge and approval queue. Live ingestion is verified end to end: Fireflies
+transcript listing and Gmail OAuth refresh → history/backfill → full message
+fetch (636 messages in a 14-day backfill).
 
-**Fixture-backed:** Fireflies transcript bodies and Gmail message bodies/sends.
-The connector HTTP paths are implemented but need your `FIREFLIES_API_KEY` and
-a Gmail token to exercise.
+**Fixture-backed:** Gmail *sending* and the offline demo. The connector send
+path is implemented but has not been exercised against a real mailbox.
 
 **Polling, not webhooks:** a desktop app has no public URL, so ingestion is
 pull-based. Fireflies is listed by date window (14-day first backfill, 24-hour
@@ -163,21 +163,20 @@ schedule (`next_sync_at`), retry with capped exponential backoff, and stop on a
 dead credential (`reauth_required`) instead of hammering it. Webhook routes
 still exist for development or a relay, gated by `GATHER_INGRESS=http`.
 
-**Deliberately not built yet:** Google OAuth token refresh, Pub/Sub
-subscription renewal, Slack app install, Postgres/RLS, vector search, and
-Drive/Calendar/Teams connectors.
+**Deliberately not built yet:** Pub/Sub subscription renewal, Slack app install,
+Postgres/RLS, vector search, and Drive/Calendar/Teams connectors.
 
 ## Production swap list
 
 1. Inline background tasks → the in-process scheduler thread (Phase 3).
-2. Token renewal for Google OAuth (refresh tokens in the keychain).
-3. `.env` keys → the OS keychain.
-4. `api.py` → the stdio IPC adapter (HTTP stays as a headless dev mode).
-5. Ollama, so the app still works offline.
+2. `.env` keys → the OS keychain (the Google refresh token works from `.env`
+   today; the keychain is the desktop hardening step).
+3. `api.py` → the stdio IPC adapter (HTTP stays as a headless dev mode).
+4. Ollama, so the app still works offline.
 
 Done already: durable `SqliteSaver` checkpoints, a versioned schema, real
-Fireflies/Gmail polling with cursor repair and backoff, and an ingress switch
-that keeps webhooks out of the desktop path.
+Fireflies/Gmail polling with cursor repair and backoff, Google OAuth refresh
+tokens, and an ingress switch that keeps webhooks out of the desktop path.
 
 ## Next connectors
 

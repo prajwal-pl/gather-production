@@ -34,7 +34,6 @@ class ModelSpec:
 DEFAULT_CHAIN = (
     "groq:openai/gpt-oss-120b",
     "openrouter:nvidia/nemotron-3.5-lightning:free",
-    "openrouter:inclusionai/ling-3.2-flash:free",
 )
 
 PROVIDER_KEY_ENV = {
@@ -96,6 +95,9 @@ class Settings:
     ingress: str = "http"
     fireflies_secret: str = ""
     gmail_token: str = ""
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    gmail_refresh_token: str = ""
     slack_signing_secret: str = ""
     slack_webhook_url: str = ""
 
@@ -155,6 +157,9 @@ def load_settings(**overrides) -> Settings:
         "ingress": os.environ.get("GATHER_INGRESS", "http").strip().lower(),
         "fireflies_secret": os.environ.get("FIREFLIES_WEBHOOK_SECRET", ""),
         "gmail_token": os.environ.get("GMAIL_WEBHOOK_TOKEN", ""),
+        "google_client_id": os.environ.get("GOOGLE_CLIENT_ID", ""),
+        "google_client_secret": os.environ.get("GOOGLE_CLIENT_SECRET", ""),
+        "gmail_refresh_token": os.environ.get("GMAIL_REFRESH_TOKEN", ""),
         "slack_signing_secret": os.environ.get("SLACK_SIGNING_SECRET", ""),
         "slack_webhook_url": os.environ.get("SLACK_WEBHOOK_URL", ""),
     }
