@@ -15,6 +15,7 @@ uv run gather check         # probe each free model in your chain
 uv run gather seed          # org + demo members, so `serve` is usable
 uv run gather sync          # poll every due connection once
 uv run gather serve         # webhook + approval API on :8000 (development)
+uv run gather-engine        # desktop engine: stdio JSON lines (Tauri spawns this)
 ```
 
 `--data-dir <path>` works before or after the subcommand. Without it, state
@@ -26,6 +27,9 @@ Windows). `GATHER_DB` remains a single-file development override.
 <data-dir>/
   gather.db            # tasks, meetings, events, proposals
   checkpoints.db       # paused graph runs / pending approvals
+  engine.lock          # advisory lock: one engine per workspace
+  secrets.json         # only if no OS keychain is available (0600)
+  logs/engine.log      # rotated, redacted
 ```
 
 Verified against the keys in this workspace (Nov 2026):
@@ -46,7 +50,7 @@ Fireflies ──► poll (transcripts) ──► dedupe(raw_events) ──► me
                                                               │ approve
                                                     persist ─► notify
 Gmail ─────► poll (historyId) ─────► inbox graph: load ─► match ─► classify ─► apply
-cron ──────────────────────────────► scheduler: overdue ─► draft nudge ─► proposal
+engine clock ─► overdue ─► draft nudge ─► proposal      (one thread, no cron)
 
 webhooks ──► development/relay only (GATHER_INGRESS=http)
 ```
@@ -74,7 +78,7 @@ Every node before `review` is bookkeeping. Only `extract`, `classify` and
 | Providers are interchangeable | `CapabilityHub` + `Connector` protocol |
 
 ```
-tests/  39 passed
+tests/  61 passed
 ```
 
 ## Why free models are enough here
@@ -111,6 +115,12 @@ src/gather/
   agents/              extract.py, classify.py, draft.py   ← only LLM call sites
   graphs/              meeting_to_tasks.py, inbox_monitor.py
   workers/scheduler.py overdue sweep + renewal report
+  engine.py            desktop entry point (stdio, lock, logs, signals)
+  ipc/                 protocol.py, router.py, stdio.py, handlers.py
+  scheduler.py         the engine clock: poll / sweep / announce / cancel
+  secrets.py           OS keychain, 0600 file fallback, stored settings
+  events.py, runs.py   event bus + cooperative run registry
+  lock.py              one-engine-per-workspace advisory lock
   api.py               webhooks, approval queue, reads
   demo.py              the end-to-end walkthrough
   fixtures/            realistic payloads for offline runs
@@ -143,6 +153,41 @@ curl -X POST localhost:8000/proposals/<id>/reject
 `/health` reports which models are active and how many calls this process has
 made.
 
+## The engine (desktop)
+
+The Tauri shell will spawn one engine and talk to it over stdio; `api.py` stays
+as a headless dev adapter. stdout is protocol only, logs go to stderr and
+`<data-dir>/logs/engine.log` (rotated and redacted). One advisory lock next to
+the DB makes a second engine refuse to start.
+
+```bash
+uv run gather-engine --data-dir ~/.local/share/gather --secrets auto
+# auto: OS keychain if available, else a 0600 secrets.json with a warning
+# keychain: require the OS keychain; file: force the 0600 file; env: dev only
+
+# request
+{"id":"r1","method":"tasks.list","params":{"status":"open"}}
+# response
+{"id":"r1","ok":true,"result":{"tasks":[...]}}
+# event
+{"event":"run.progress","data":{"run_id":"run_ab12","stage":"extract","chunk":2,"total":5}}
+```
+
+Methods: `health`, `engine.shutdown`, `settings.get/update`,
+`connections.list/add/remove/test`, `sync.now`, `meetings.list/get/ingest`,
+`runs.list/get/cancel`, `tasks.list/get/update`,
+`proposals.list/get/approve/reject`, `models.check/usage`, `scheduler.status`.
+
+The scheduler is one non-overlapping tick: poll due connections, run the overdue
+sweep when due, announce new proposals, then wait. It catches up immediately
+after start or sleep. A tick is a cancellable run; cancellation stops at the
+next event/chunk boundary and leaves the cursor untouched.
+
+Settings (model chain, pacing, auto-approve) can be written through
+`settings.update`; they are stored beside the secrets and overlaid at startup.
+Secret values are never returned over IPC, only whether each is present.
+`--fixture` and `--no-scheduler` exist for tests.
+
 ## What is mocked, and what is real
 
 **Real and exercised here:** the model chain (Groq + one OpenRouter free
@@ -168,15 +213,18 @@ Postgres/RLS, vector search, and Drive/Calendar/Teams connectors.
 
 ## Production swap list
 
-1. Inline background tasks → the in-process scheduler thread (Phase 3).
-2. `.env` keys → the OS keychain (the Google refresh token works from `.env`
-   today; the keychain is the desktop hardening step).
-3. `api.py` → the stdio IPC adapter (HTTP stays as a headless dev mode).
-4. Ollama, so the app still works offline.
+1. `apps/desktop/` Tauri shell: window, tray, single instance, supervision and
+   the React approval inbox (Phase 4).
+2. PyInstaller sidecar builds, per-OS CI, signing/notarization, updater
+   (Phase 5).
+3. Ollama, so the app still works offline.
+4. Slack (Socket Mode), Calendar, Drive, Teams (Phase 6).
 
 Done already: durable `SqliteSaver` checkpoints, a versioned schema, real
 Fireflies/Gmail polling with cursor repair and backoff, Google OAuth refresh
-tokens, and an ingress switch that keeps webhooks out of the desktop path.
+tokens, an ingress switch that keeps webhooks out of the desktop path, the
+stdio engine with cooperative cancellation, a keychain-backed secret store, and
+the one-engine-per-workspace lock.
 
 ## Next connectors
 

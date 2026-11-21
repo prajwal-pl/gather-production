@@ -18,12 +18,12 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Mapping, TypeVar
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, ValidationError
 
-from .config import ModelSpec, Settings
+from .config import PROVIDER_KEY_ENV, ModelSpec, Settings
 from .domain import parse_due_date
 
 T = TypeVar("T", bound=BaseModel)
@@ -151,6 +151,7 @@ class ProviderLLM(BaseLLM):
         temperature: float = 0.1,
         timeout: int = 90,
         log: Callable[[str], None] = print,
+        api_keys: Mapping[str, str] | None = None,
     ) -> None:
         if not specs:
             raise ValueError("ProviderLLM needs at least one model spec")
@@ -160,9 +161,19 @@ class ProviderLLM(BaseLLM):
         self.temperature = temperature
         self.timeout = timeout
         self.log = log
+        # An explicit mapping (the engine's keychain view) is authoritative.
+        # Only ``None`` means "read the process environment" for CLI/dev.
+        self._keys_explicit = api_keys is not None
+        self.api_keys = dict(api_keys or {})
         self.usage = Usage()
         self._cache: dict[str, Any] = {}
         self._last_call = 0.0
+
+    def _key(self, provider: str) -> str:
+        env_name = PROVIDER_KEY_ENV[provider]
+        if self._keys_explicit:
+            return self.api_keys.get(env_name, "")
+        return os.environ.get(env_name, "")
 
     def _model(self, spec: ModelSpec):
         if spec.label in self._cache:
@@ -181,7 +192,7 @@ class ProviderLLM(BaseLLM):
             if spec.model.startswith(("openai/gpt-oss", "qwen/")):
                 kwargs["reasoning_effort"] = "low"
             model = ChatGroq(
-                api_key=os.environ.get("GROQ_API_KEY", ""),
+                api_key=self._key("groq"),
                 timeout=self.timeout,  # seconds
                 **kwargs,
             )
@@ -189,7 +200,7 @@ class ProviderLLM(BaseLLM):
             from langchain_openrouter import ChatOpenRouter
 
             model = ChatOpenRouter(
-                api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+                api_key=self._key("openrouter"),
                 app_title="gather",
                 timeout=self.timeout * 1000,  # this SDK expects milliseconds
                 **kwargs,
@@ -432,8 +443,19 @@ def build_llm(
     *,
     log: Callable[[str], None] = print,
     force_fixture: bool = False,
+    api_keys: Mapping[str, str] | None = None,
 ) -> BaseLLM:
-    specs = () if force_fixture else settings.live_models
+    keys = dict(api_keys) if api_keys is not None else None
+    if force_fixture:
+        specs: tuple[ModelSpec, ...] = ()
+    elif keys is not None:
+        specs = tuple(
+            spec
+            for spec in settings.chain
+            if keys.get(PROVIDER_KEY_ENV[spec.provider])
+        )
+    else:
+        specs = settings.live_models
     if not specs:
         log("[llm] no provider keys found -> offline fixture model")
         return FixtureLLM(log=log)
@@ -443,4 +465,5 @@ def build_llm(
         max_calls=settings.max_calls_per_run,
         min_interval=settings.min_interval_s,
         log=log,
+        api_keys=keys,
     )

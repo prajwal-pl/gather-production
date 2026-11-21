@@ -141,7 +141,7 @@ One engine process per app instance.
 | Concern | Decision |
 |---|---|
 | Spawn | Tauri `shell` plugin, `sidecar("gather-engine")` |
-| Args | `--data-dir <app_data_dir> --ipc stdio` |
+| Args | `--data-dir <app_data_dir> --ipc stdio --secrets keychain` |
 | Restart | supervised, exponential backoff, max 5 attempts, then surface an error state |
 | Shutdown | Tauri sends `engine.shutdown`, waits 3s, then kills |
 | Single instance | Tauri single-instance plugin **and** an advisory lock file next to the DB |
@@ -180,19 +180,33 @@ Method surface (thin adapter over `Runtime`; no new domain logic):
 |---|---|
 | system | `health`, `engine.shutdown`, `settings.get`, `settings.update` |
 | connections | `connections.list`, `connections.add`, `connections.remove`, `connections.test`, `sync.now` |
-| capture | `meetings.list`, `meetings.get`, `meetings.ingest`, `runs.get`, `runs.cancel` |
+| capture | `meetings.list`, `meetings.get`, `meetings.ingest`, `runs.list`, `runs.get`, `runs.cancel` |
 | tasks | `tasks.list`, `tasks.get`, `tasks.update` |
 | approvals | `proposals.list`, `proposals.get`, `proposals.approve`, `proposals.reject` |
 | models | `models.check`, `models.usage` |
+| scheduler | `scheduler.status` |
+
+Error codes: `bad_request`, `method_not_found`, `invalid_params`, `not_found`,
+`conflict`, `cancelled`, `unauthorized`, `busy`, `internal_error`.
 
 Implementation notes:
 
-- Reader thread parses stdin; handlers run on a bounded worker pool (graph runs
-  are blocking).
+- Reader thread parses stdin; handlers run on **two** bounded daemon pools:
+  four fast workers for reads/updates and two slow workers for graph runs,
+  provider tests, model probes and sync. A long extraction cannot block
+  `tasks.list`.
+- A full queue answers `busy` instead of growing without bound.
 - All writes to stdout go through one lock; stdout is **only** protocol. Logs go
-  to stderr.
-- Requests are idempotent where possible; `proposals.approve` must be
-  safe to call twice.
+  to stderr and a rotated `<data-dir>/logs/engine.log`, with known secret values
+  redacted.
+- Requests are idempotent where possible. `proposals.approve` and
+  `proposals.reject` take a decision lock and return `{already: true}` on a
+  second call. If the process died after resuming the graph but before recording
+  the decision, approval detects the completed checkpoint and records it without
+  re-running.
+- Cancellation is cooperative. `runs.cancel` marks the run; the graph raises at
+  the next chunk/candidate/event boundary. A cancelled poll leaves the cursor
+  untouched, so the next tick retries with dedupe.
 - Every event carries enough state that the UI can be rebuilt from
   `*.list` calls alone (events are optimizations, not truth).
 
@@ -202,6 +216,12 @@ Implementation notes:
 
 `needs_attention` covers: no model configured, token expired, keychain locked,
 all providers failing. The app must be usable (browse tasks) in that state.
+
+`health` reports `state` plus the facts behind it (`models`, `fixture_mode`,
+`scheduler.running`, `scheduler.last_error`, `secrets_backend`, `ingress`), so
+the shell renders a state rather than guessing from scattered booleans. The
+scheduler's `scheduler.error` event is the push equivalent; `health` remains the
+source of truth after a reconnect.
 
 ---
 
@@ -657,11 +677,27 @@ Packaging decisions:
 8. ✔ Webhooks gated behind `GATHER_INGRESS=http` (`poll`/`stdio` leave ingestion
    to the poller). Dev-only `POST /sync` and `gather sync` run one tick.
 
-**Phase 3 — engine IPC**
-9. `ipc/stdio.py` JSON-lines router over `Runtime` + event emitter.
-10. Scheduler thread: poll / sweep / refresh / catch-up / cancel.
-11. Keychain secret store; remove `.env` from the production path.
-12. `gather.engine` entry point used by both dev and the sidecar.
+**Phase 3 — engine IPC** ✔
+9. ✔ `ipc/stdio.py` JSON-lines server over `Runtime` (`protocol.py`,
+   `router.py`, `handlers.py`), with fast/slow worker pools, a thread-safe stdout
+   writer, `engine.ready`/`run.*`/`sync.status`/`proposal.*` events, and a
+   `gather.engine` entry point (`gather-engine` script + `python -m
+   gather.engine`).
+10. ✔ `scheduler.py`: one non-overlapping tick that polls due connections, runs
+    the nudge sweep when due, republishes pending proposals, survives failures,
+    catches up immediately after start/sleep, and runs as a cancellable run.
+    `GATHER_POLL_INTERVAL` / `GATHER_SWEEP_INTERVAL` control cadence;
+    `--no-scheduler` disables it for tests.
+11. ✔ `secrets.py`: OS keychain via `keyring` with an explicit `0600` file
+    fallback (`auto`), or `keychain`/`file`/`env` modes. Secrets are resolved
+    store-first, then environment, and injected into the LLM/connectors without
+    a required `.env`; `settings.update` never returns values. Non-secret
+    settings are persisted in the same store and overlaid at startup.
+12. ✔ One engine per workspace: `lock.py` advisory lock released by the OS on
+    crash. UTF-8 stdio, redacted rotated logs, SIGTERM/SIGINT shutdown.
+    Continued in Phase 4 (`13` onward).
+    Verified by 61 tests, including a subprocess that spawns the engine and
+    performs ingest → proposal → approve → tasks over JSON lines.
 
 **Phase 4 — Tauri shell**
 13. `apps/desktop/` (Rust + web UI), sidecar config, tray, single instance,

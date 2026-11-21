@@ -238,6 +238,27 @@ class GmailConnector:
 
         return SyncBatch(events=events, cursor=cursor)
 
+    def test(self, conn: Connection) -> dict[str, Any]:
+        """Cheap connectivity check used by ``connections.test``."""
+        token = self._token(conn)
+        if not token:
+            return {"ok": False, "error": "no Gmail credentials configured"}
+        try:
+            response = httpx.get(
+                f"{API}/profile",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30,
+            )
+            _check(response)
+            body = response.json()
+            return {
+                "ok": True,
+                "detail": body.get("emailAddress"),
+                "history_id": body.get("historyId"),
+            }
+        except Exception as exc:  # noqa: BLE001 - report, do not crash the engine
+            return {"ok": False, "error": str(exc)[:300]}
+
     def _profile(self, token: str) -> str:
         response = httpx.get(
             f"{API}/profile",

@@ -12,3 +12,4 @@ wheels/
 # Local data
 .gather/
 .pytest_cache/
+node_modules

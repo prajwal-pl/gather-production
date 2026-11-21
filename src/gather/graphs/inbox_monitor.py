@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, TypedDict
+from typing import Any, Callable, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
@@ -34,9 +34,14 @@ class InboxDeps:
     notifier: Notifier
     settings: Any
     today: date | None = None
+    progress: Callable[[str, dict[str, Any]], None] | None = None
 
     def day(self) -> date:
         return self.today or date.today()
+
+    def report(self, stage: str, data: dict[str, Any] | None = None) -> None:
+        if self.progress is not None:
+            self.progress(stage, data or {})
 
 
 class InboxState(TypedDict, total=False):
@@ -63,11 +68,13 @@ def build_inbox_graph(deps: InboxDeps, *, checkpointer: Any):
     store = deps.store
 
     def load(state: InboxState) -> dict:
+        deps.report("load", {"provider": state["message"].get("provider")})
         message = Message(**state["message"])
         message_id = store.save_message(message)
         return {"message_id": message_id}
 
     def match(state: InboxState) -> dict:
+        deps.report("match", {})
         message = Message(**state["message"])
         body_tokens = _tokens(f"{message.subject} {message.body_text[:800]}")
         best: dict | None = None
@@ -113,6 +120,7 @@ def build_inbox_graph(deps: InboxDeps, *, checkpointer: Any):
                 }
             }
         message = Message(**state["message"])
+        deps.report("classify", {"task": task["id"]})
         try:
             intent = classify_reply(deps.llm, task=task, message=message, today=deps.day())
         except (LLMError, ValueError) as exc:
@@ -134,6 +142,7 @@ def build_inbox_graph(deps: InboxDeps, *, checkpointer: Any):
         return {"intent": intent.model_dump()}
 
     def apply(state: InboxState) -> dict:
+        deps.report("apply", {})
         task = state.get("task")
         intent = state.get("intent") or {}
         if not task:

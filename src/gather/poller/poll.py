@@ -21,6 +21,7 @@ from ..connectors.base import (
 )
 from ..db import Store
 from ..domain import Event
+from ..runs import RunCancelled
 
 DEFAULT_INTERVAL_S = 300
 MAX_BACKOFF_S = 30 * 60
@@ -143,6 +144,10 @@ class PollSource:
                 cursor=cursor,
                 next_sync_at=_iso(next_at),
             )
+        except RunCancelled:
+            # A human cancelled the run; this is not a provider failure, so do
+            # not back the connection off or mark it unhealthy.
+            raise
         except AuthExpired as exc:
             return self._backoff(conn, exc, now, status="reauth_required")
         except SyncError as exc:

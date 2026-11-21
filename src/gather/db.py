@@ -360,6 +360,12 @@ class Store:
     def set_cursor(self, connection_id: str, cursor: str) -> None:
         self._write("UPDATE connections SET cursor = ? WHERE id = ?", (cursor, connection_id))
 
+    def get_connection(self, connection_id: str) -> dict | None:
+        row = self._row("SELECT * FROM connections WHERE id = ?", (connection_id,))
+        if row:
+            row["scopes"] = json.loads(row.get("scopes") or "[]")
+        return row
+
     def due_connections(self, org_id: str, now: str, limit: int = 10) -> list[dict]:
         """Active connections whose next poll is due and which are not backing off."""
         rows = self._rows(
@@ -480,6 +486,43 @@ class Store:
 
     def mark_meeting_processed(self, meeting_id: str) -> None:
         self._write("UPDATE meetings SET processed_at = ? WHERE id = ?", (_now(), meeting_id))
+
+    def meetings(
+        self,
+        org_id: str,
+        *,
+        provider: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """List meetings without shipping whole transcripts to the UI."""
+        sql = (
+            "SELECT id, org_id, provider, external_id, title, started_at, "
+            "duration_min, participants, summary, processed_at, "
+            "length(transcript) AS transcript_chars "
+            "FROM meetings WHERE org_id = ?"
+        )
+        params: list[Any] = [org_id]
+        if provider:
+            sql += " AND provider = ?"
+            params.append(provider)
+        sql += " ORDER BY COALESCE(started_at, '') DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        rows = self._rows(sql, params)
+        for row in rows:
+            row["participants"] = json.loads(row.get("participants") or "[]")
+        return rows
+
+    def get_meeting(self, meeting_id: str) -> dict | None:
+        row = self._row("SELECT * FROM meetings WHERE id = ?", (meeting_id,))
+        if row:
+            row["participants"] = json.loads(row.get("participants") or "[]")
+        return row
+
+    def tasks_for_meeting(self, meeting_id: str) -> list[dict]:
+        return self._rows(
+            "SELECT * FROM tasks WHERE source_meeting_id = ? ORDER BY created_at",
+            (meeting_id,),
+        )
 
     # -- tasks ------------------------------------------------------------- #
 

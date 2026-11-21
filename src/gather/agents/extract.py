@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from difflib import SequenceMatcher
-from typing import Any
+from typing import Any, Callable
 
 from ..domain import Commitment, CommitmentBatch, Meeting, Person, due_from_text, normalize_title, parse_due_date
 from ..llm import BaseLLM, BudgetExceeded, LLMError, estimate_tokens
@@ -114,6 +114,7 @@ def extract_commitments(
     max_chars: int = 9000,
     max_chunks: int = 12,
     today: date | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> tuple[list[Commitment], dict[str, Any]]:
     today = today or date.today()
     chunks, truncated = chunk_transcript(meeting.transcript, max_chars=max_chars, max_chunks=max_chunks)
@@ -122,6 +123,9 @@ def extract_commitments(
     errors: list[str] = []
     hint = ""
     for index, chunk in enumerate(chunks):
+        if progress is not None:
+            # Raises RunCancelled at the active run's next boundary.
+            progress(index, len(chunks))
         try:
             found.extend(
                 extract_from_chunk(

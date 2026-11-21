@@ -14,9 +14,18 @@ from .config import Settings
 
 
 class Notifier:
-    def __init__(self, settings: Settings, log: Callable[[str], None] = print) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        log: Callable[[str], None] = print,
+        *,
+        webhook_url: str | None = None,
+    ) -> None:
         self.settings = settings
         self.log = log
+        # The engine resolves secrets from the keychain; ``None`` keeps the
+        # environment/.env behaviour used by the CLI and tests.
+        self.webhook_url = webhook_url if webhook_url is not None else settings.slack_webhook_url
         self.outbox: list[dict[str, Any]] = []
 
     def send(
@@ -37,10 +46,10 @@ class Notifier:
         }
         self.outbox.append(record)
 
-        if self.settings.slack_webhook_url:
+        if self.webhook_url:
             try:
                 httpx.post(
-                    self.settings.slack_webhook_url,
+                    self.webhook_url,
                     json={"text": f"*{subject}*\n{body}"},
                     timeout=15,
                 )

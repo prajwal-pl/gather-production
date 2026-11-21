@@ -128,6 +128,31 @@ class FirefliesConnector:
             return SyncBatch(events=[], cursor=conn.cursor)
         return self._window(conn, since, datetime.now(timezone.utc), limit)
 
+    def test(self, conn: Connection) -> dict[str, Any]:
+        """Cheap connectivity check used by ``connections.test``."""
+        if not self.api_key:
+            return {"ok": False, "error": "no Fireflies API key configured"}
+        try:
+            now = datetime.now(timezone.utc)
+            data = self._query(
+                _LIST_TRANSCRIPTS_QUERY,
+                {
+                    "from": _iso(now - timedelta(days=7)),
+                    "to": _iso(now),
+                    "limit": 1,
+                    "skip": 0,
+                },
+            )
+            rows = data.get("transcripts")
+            if rows is None:
+                return {"ok": False, "error": "transcript list missing from the response"}
+            return {
+                "ok": True,
+                "detail": f"{len(rows)} transcript(s) visible in the last 7 days",
+            }
+        except Exception as exc:  # noqa: BLE001 - report, do not crash the engine
+            return {"ok": False, "error": str(exc)[:300]}
+
     def _window(
         self, conn: Connection, start: datetime, end: datetime, limit: int
     ) -> SyncBatch:

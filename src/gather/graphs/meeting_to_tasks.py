@@ -13,7 +13,7 @@ import operator
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, Callable, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Send, interrupt
@@ -40,9 +40,16 @@ class Deps:
     fireflies: FirefliesConnector
     settings: Any
     today: date | None = None
+    # Optional progress hook: ``(stage, data)``. The engine binds it to the
+    # active run; CLI/tests leave it unset.
+    progress: Callable[[str, dict[str, Any]], None] | None = None
 
     def day(self) -> date:
         return self.today or date.today()
+
+    def report(self, stage: str, data: dict[str, Any] | None = None) -> None:
+        if self.progress is not None:
+            self.progress(stage, data or {})
 
 
 class MeetingState(TypedDict, total=False):
@@ -63,6 +70,7 @@ class MeetingState(TypedDict, total=False):
     decision: dict
     created: list[dict]
     candidate: dict
+    manual: bool
 
 
 def build_meeting_graph(deps: Deps, *, checkpointer: Any):
@@ -76,6 +84,35 @@ def build_meeting_graph(deps: Deps, *, checkpointer: Any):
     # -- nodes ------------------------------------------------------------- #
 
     def load(state: MeetingState) -> dict:
+        deps.report("load", {"external_id": state.get("external_id")})
+        if state.get("manual") and state.get("meeting_row_id"):
+            # Manual/paste ingestion already wrote the row; do not ask the
+            # provider for a transcript we were given directly.
+            row = store.get_meeting(state["meeting_row_id"])
+            if row is None:
+                raise ValueError(f"meeting {state['meeting_row_id']} not found")
+            meeting = Meeting(
+                id=row["id"],
+                org_id=row["org_id"],
+                provider=row["provider"],
+                external_id=row["external_id"],
+                title=row.get("title") or "Untitled meeting",
+                started_at=(
+                    datetime.fromisoformat(row["started_at"]) if row.get("started_at") else None
+                ),
+                duration_min=row.get("duration_min"),
+                participants=[Person(**person) for person in row.get("participants", [])],
+                transcript=row.get("transcript") or "",
+                summary=row.get("summary"),
+            )
+            return {
+                "meeting_row_id": row["id"],
+                "title": meeting.title,
+                "started_at": meeting.started_at.isoformat() if meeting.started_at else None,
+                "participants": [person.model_dump() for person in meeting.participants],
+                "transcript": meeting.transcript,
+            }
+
         org_id, external_id = state["org_id"], state["external_id"]
         matches = deps.hub.active(org_id, Capability.GET_TRANSCRIPT, provider="fireflies")
         if matches:
@@ -116,6 +153,9 @@ def build_meeting_graph(deps: Deps, *, checkpointer: Any):
             max_chars=settings.chunk_chars,
             max_chunks=settings.max_chunks,
             today=deps.day(),
+            progress=lambda index, total: deps.report(
+                "extract", {"chunk": index + 1, "total": total}
+            ),
         )
         warning = ""
         if stats["truncated"]:
@@ -135,6 +175,7 @@ def build_meeting_graph(deps: Deps, *, checkpointer: Any):
         }
 
     def resolve(state: MeetingState) -> dict:
+        deps.report("resolve", {"candidates": len(state.get("candidates", []))})
         users = store.users(state["org_id"])
         open_tasks = store.open_tasks(state["org_id"])
         fresh: list[dict] = []
@@ -180,6 +221,7 @@ def build_meeting_graph(deps: Deps, *, checkpointer: Any):
 
     def enrich(state: MeetingState) -> dict:
         candidate = dict(state["candidate"])
+        deps.report("enrich", {"candidate": candidate.get("title", "")})
         query = f"{candidate['title']} {candidate.get('owner_email') or ''}".strip()
         hits = deps.hub.search_messages(state["org_id"], query, limit=3)
         candidate["context"] = [
@@ -202,6 +244,7 @@ def build_meeting_graph(deps: Deps, *, checkpointer: Any):
         return {"enriched": [candidate]}
 
     def review(state: MeetingState) -> dict:
+        deps.report("review", {"tasks": len(state.get("enriched") or [])})
         cards = state.get("enriched") or []
         proposal = store.create_proposal(
             state["org_id"],
@@ -229,6 +272,7 @@ def build_meeting_graph(deps: Deps, *, checkpointer: Any):
         return {"decision": decision if isinstance(decision, dict) else {}}
 
     def persist(state: MeetingState) -> dict:
+        deps.report("persist", {})
         decision = state.get("decision") or {}
         approved = set(decision.get("approved") or [])
         edits: dict = decision.get("edits") or {}
@@ -319,12 +363,21 @@ def run_meeting(
     org_id: str,
     external_id: str,
     thread_id: str | None = None,
+    meeting_row_id: str | None = None,
+    manual: bool = False,
 ) -> tuple[dict, str]:
     thread_id = thread_id or f"meeting-{external_id}-{uuid.uuid4().hex[:6]}"
     config = {"configurable": {"thread_id": thread_id}}
-    state = graph.invoke(
-        {"org_id": org_id, "thread_id": thread_id, "external_id": external_id}, config
-    )
+    initial: dict[str, Any] = {
+        "org_id": org_id,
+        "thread_id": thread_id,
+        "external_id": external_id,
+    }
+    if meeting_row_id:
+        initial["meeting_row_id"] = meeting_row_id
+    if manual:
+        initial["manual"] = True
+    state = graph.invoke(initial, config)
     return state, thread_id
 
 

@@ -1,0 +1,8 @@
+use std::process::Command;
+use tauri::Builder;
+
+fn main() {
+    tauri::Builder::default()
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

@@ -47,6 +47,19 @@ def main() -> int:
 
     sub.add_parser("sync", help="poll connected providers once", parents=[storage])
 
+    engine = sub.add_parser(
+        "engine",
+        help="run the desktop engine over stdio (JSON lines)",
+        parents=[storage],
+    )
+    engine.add_argument(
+        "--secrets",
+        choices=["auto", "keychain", "file", "env"],
+        default="auto",
+    )
+    engine.add_argument("--no-scheduler", action="store_true")
+    engine.add_argument("--fixture", action="store_true")
+
     args = parser.parse_args()
 
     # Downstream settings loaders read the environment. One assignment keeps
@@ -115,6 +128,18 @@ def main() -> int:
         from gather.check import main as run_check
 
         return run_check(["--timeout", str(args.timeout)])
+
+    if args.command == "engine":
+        from gather.engine import main as run_engine
+
+        argv: list[str] = ["--secrets", args.secrets]
+        if data_dir:
+            argv.extend(["--data-dir", data_dir])
+        if args.no_scheduler:
+            argv.append("--no-scheduler")
+        if args.fixture:
+            argv.append("--fixture")
+        return run_engine(argv)
 
     if args.command == "seed":
         from gather.seed import main as run_seed

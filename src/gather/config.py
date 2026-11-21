@@ -58,7 +58,7 @@ def default_data_dir() -> Path:
     return (Path(base) if base else Path.home() / ".local" / "share") / APP_DIR_NAME
 
 
-def _parse_chain(raw: str) -> tuple[ModelSpec, ...]:
+def parse_chain(raw: str) -> tuple[ModelSpec, ...]:
     specs: list[ModelSpec] = []
     for part in raw.split(","):
         part = part.strip()
@@ -100,6 +100,11 @@ class Settings:
     gmail_refresh_token: str = ""
     slack_signing_secret: str = ""
     slack_webhook_url: str = ""
+    # Engine scheduler. Fine-grained connection scheduling still lives in the
+    # ``connections`` table; this is how often the engine checks what is due.
+    poll_interval_s: float = 30.0
+    sweep_interval_s: float = 6 * 60 * 60
+    scheduler_enabled: bool = True
 
     @property
     def live_models(self) -> tuple[ModelSpec, ...]:
@@ -148,7 +153,7 @@ def load_settings(**overrides) -> Settings:
         "data_dir": data_dir,
         "db_path": db_path,
         "checkpoints_path": checkpoints_path,
-        "chain": _parse_chain(os.environ.get("GATHER_MODEL_CHAIN", ",".join(DEFAULT_CHAIN))),
+        "chain": parse_chain(os.environ.get("GATHER_MODEL_CHAIN", ",".join(DEFAULT_CHAIN))),
         "min_interval_s": float(os.environ.get("GATHER_MIN_INTERVAL", "0")),
         "max_calls_per_run": int(os.environ.get("GATHER_MAX_CALLS", "24")),
         "chunk_chars": int(os.environ.get("GATHER_CHUNK_CHARS", "9000")),
@@ -162,6 +167,9 @@ def load_settings(**overrides) -> Settings:
         "gmail_refresh_token": os.environ.get("GMAIL_REFRESH_TOKEN", ""),
         "slack_signing_secret": os.environ.get("SLACK_SIGNING_SECRET", ""),
         "slack_webhook_url": os.environ.get("SLACK_WEBHOOK_URL", ""),
+        "poll_interval_s": float(os.environ.get("GATHER_POLL_INTERVAL", "30")),
+        "sweep_interval_s": float(os.environ.get("GATHER_SWEEP_INTERVAL", str(6 * 60 * 60))),
+        "scheduler_enabled": _flag("GATHER_SCHEDULER", "1"),
     }
     base.update(overrides)
     settings = Settings(**base)
