@@ -1,0 +1,346 @@
+# DESIGN BRIEF: gather Desktop UI
+
+## Philosophy
+**Work-focused, not marketing-focused.** The UI should feel like a precise desktop tool, not a web app. Inspired by nteract, screenpipe, and linear-inspired macOS-native designs.
+
+## Core Principles
+1. **Color only when it means something** — status, identity, links; never decoration
+2. **System font stack** — native platform sans, feels like a desktop tool
+3. **Monospace for code/execution** — makes state feel inspectable and exact
+4. **Hairline borders** — 1px dividers, no decorative padding
+5. **Minimal motion** — 150ms state changes only, no spring/lingering animations
+6. **Content-first** — typography carries hierarchy, not boxes
+7. **One accent color** — used sparingly for semantic meaning only
+
+## Color System (OKLCH-based, dark-first)
+
+### Light Theme (`:root`)
+| Token | Value | Role |
+|-------|-------|------|
+| `--background` | `oklch(1 0 0)` | Canvas |
+| `--foreground` | `oklch(0.145 0 0)` | Primary text |
+| `--card` | `oklch(1 0 0)` | Card surfaces |
+| `--card-foreground` | `oklch(0.145 0 0)` | Card text |
+| `--muted` | `oklch(0.97 0 0)` | Subtle surfaces |
+| `--muted-foreground` | `oklch(0.556 0 0)` | Secondary text, labels |
+| `--border` | `oklch(0.922 0 0)` | Hairline dividers |
+| `--primary` | `oklch(0.205 0 0)` | **Semantic accent** — primary actions, focus rings |
+| `--primary-foreground` | `oklch(0.985 0 0)` | Text on primary |
+| `--success` | `oklch(0.472 0.205 143.33)` | Success states |
+| `--destructive` | `oklch(0.577 0.245 27.325)` | Errors, destructive actions |
+| `--border` | `oklch(0.922 0 0) / 0.3` | Input borders, dividers |
+
+### Dark Theme (`.dark`)
+| Token | Value | Role |
+|-------|-------|------|
+| `--background` | `oklch(0.145 0 0)` | Canvas |
+| `--foreground` | `oklch(0.985 0 0)` | Primary text |
+| `--card` | `oklch(0.205 0 0)` | Card surfaces |
+| `--card-foreground` | `oklch(0.985 0 0)` | Card text |
+| `--muted` | `oklch(0.269 0 0)` | Subtle surfaces |
+| `--muted-foreground` | `oklch(0.708 0 0)` | Secondary text |
+| `--border` | `oklch(1 0 0 / 0.1)` | Hairline dividers |
+| `--primary` | `oklch(0.922 0 0)` | **Semantic accent** — primary actions, focus rings |
+| `--primary-foreground` | `oklch(0.205 0 0)` | Text on primary |
+| `--success` | `oklch(0.397 0.348 157.24)` | Success states |
+| `--destructive` | `oklch(0.704 0.191 22.216)` | Errors, destructive actions |
+| `--border` | `oklch(1 0 0 / 0.08)` | Input borders, dividers |
+
+### Accent Usage Rules
+- `--primary` appears ONLY on: primary buttons, focus rings, active list row highlights, task priority indicators
+- `--success` appears ONLY on: completed task badges, successful nudge deliveries
+- `--destructive` appears ONLY on: error bans, delete confirmations, failed states
+- **Never** use accent colors for decoration, hover states, or background fills
+
+## Typography System (rem-based, system font scale)
+
+| Style | Class / token | rem (px @16) | Weight | Line-h | Usage |
+|-------|---------------|--------------|--------|-------|-------|
+| Page title | `text-page` / `--text-page` | 1.375rem (22px) | 600 | 1.2 | Window title, first-run onboarding |
+| Section title | `text-section` / `--text-section` | 1rem (16px) | 600 | Hero headings, app name |
+| Card title | `text-card` / `--text-card` | 0.875rem (14px) | 500 | Meeting cards, task headers |
+| Body / controls | `text-body` / `--text-body` | 0.8125rem (13px) | 400–500 | Default UI text, buttons, inputs, prose |
+| Caption | `text-caption` / `--text-caption` | 0.75rem (12px) | 400 | Toasts, metadata, hints |
+| Micro-label | `text-micro` / `--text-micro` | 0.6875rem (11px) | 500, uppercase | Panel headers ("MEETINGS", "TASKS") |
+| Count badge | `text-badge` / `--text-badge` | 0.625rem (10px) | 500 | Numeric count badges only |
+
+**Rare one-off sizes** — write as arbitrary `rem` literals, never px.
+
+**Monospace** (`font-mono`): Code, file paths, terminal output, stack traces, technical identifiers. Uses `"SF Mono", "JetBrains Mono", "Fira Code", monospace`.
+
+**Line heights**: Tight (1.2) for headers; relaxed (1.5) for body copy.
+
+## Layout & Spacing
+- **Control height**: 36px (body), 28px (small)
+- **Row height**: 24px vertical rhythm
+- **Padding**: 8px horizontal, 12px vertical for dense panels
+- **Maximum width**: 86ch for prose, none for UI controls
+- **Gap**: 12px between grid items, 16px between major sections
+
+## Radius & Shadows
+- **Radius**: 0px (fixed corners). No pills, no circles (radio buttons excepted).
+- **Shadows**: None on panels/buttons. Menus/popups/tooltips/modals get `0 4px 12px rgba(0,0,0,.15)`.
+- **No glassmorphism, no gradients, no translucency**
+
+## Icon Policy
+- **Monochrome only**: `text-muted-foreground` for navigation/icons
+- **Color reserved** for: status dots, error/warning badges, identity markers, link accents
+- **No decorative left-border accents** anywhere
+
+## Keyboard Focus
+- **Focus ring**: `var(--primary)` with `var(--ring)` offset
+- **Focus ring width**: 2px
+- **Focus visible**: Always visible (no `:focus-only` hiding)
+- **Tab order**: Logical, circular through interactive elements
+
+## Density & Layout
+- **20px vertical rhythm** between rows
+- **22px control height** (buttons, inputs)
+- **12px horizontal padding** on dense panels
+- **16px spacing** between major sections
+- **No hero sections, no three-card rows, no bento grids**
+- **Layout**: menubar → toolbar → resizable panels → statusbar
+
+## Typography Hierarchy
+- **Display** (`font-display text-6xl font-normal tracking-tight`): Rare first-run moments
+- **Headline** (`font-display text-2xl font-normal tracking-tight`): Page titles
+- **Title** (`font-display text-lg font-semibold tracking-tight`): Section headers
+- **Body** (`font-sans text-sm font-normal leading-relaxed`): Default UI copy
+- **Label** (`font-sans text-xs font-medium tracking-wide`): Compact metadata, badges
+- **Mono** (`font-mono`): Code, paths, terminal output
+
+---
+
+## Implementation Notes
+
+### CSS Structure (`src/styles/globals.css`)
+```css
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  /* Tokens mapped from design brief */
+  --radius: 0rem;
+  
+  /* Light mode */
+  :root {
+    --background: oklch(1 0 0);
+    --foreground: oklch(0.145 0 0);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.145 0 0);
+    --muted: oklch(0.97 0 0);
+    --muted-foreground: oklch(0.556 0 0);
+    --primary: oklch(0.205 0 0);
+    --primary-foreground: oklch(0.985 0 0);
+    --success: oklch(0.472 0.205 143.33);
+    --destructive: oklch(0.577 0.245 27.325);
+    --border: oklch(0.922 0 0 / 0.3);
+    --ring: oklch(0.708 0 0);
+  }
+  
+  .dark {
+    --background: oklch(0.145 0 0);
+    --foreground: oklch(0.985 0 0);
+    --card: oklch(0.205 0 0);
+    --card-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --primary: oklch(0.922 0 0);
+    --primary-foreground: oklch(0.205 0 0);
+    --success: oklch(0.397 0.348 157.24);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 0.1);
+    --ring: oklch(0.556 0 0);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+```
+
+### Font Stack
+```css
+font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Noto Sans", sans-serif;
+font-feature-settings: "rlig" on, "calt" on;
+--font-mono: "SF Mono", "JetBrains Mono", "Fira Code", "Source Code Pro", monospace;
+```
+
+### Key Design Enforcements (build-time checks)
+- **No decorative color** — CI lint rule: any `bg:` or `text:` utility not mapped to a design token fails
+- **Fixed radius** — `border-radius: 0` enforced; components using `rounded` fail lint
+- **No box-shadow** on non-modal elements — lint error
+- **System font only** — custom webfonts fail lint
+
+### Component Guidelines
+- **Buttons**: Fixed height 28px, fixed radius 0, primary uses `--primary` bg with `--primary-foreground` text, secondary uses `--card` bg with `--muted-foreground` text
+- **Inputs**: 28px height, 0 radius, `--border` border, `--background` fill, `--primary` focus ring
+- **Badges**: 0 radius, small text (`text-caption`), `--primary` or `--success`/`--destructive` bg with `--primary-foreground`/`--foreground` text
+- **Lists/Rows**: Height 24px, no bg on alternating rows (only on selection), `--primary` bg on active row
+- **Tables**: striped rows optional (only if `border-y` border-2 `--border`), no bg gradients
+
+### Dark Mode
+- Automatic via `.dark` class (system preference)
+- No forced light/dark toggle (the app respects system preference)
+- All tokens defined for both themes; adding new roles requires both light and dark values
+
+### Accessibility
+- Contrast: >=4.5:1 for body text, >=3:1 for borders and focus rings
+- Focus ring always visible (no `:focus-only` hiding)
+- Text resize: `font-size: 100%` → `var(--system-text-scale)` multiplies rem values
+- No color-only meaning (text + icon or text + border for all state changes)</think>Now let me create the actual configuration files for the gather UI:
+<tool_call>
+<function=write>
+<parameter=content>
+/* ============================================================
+   gather — minimal desktop UI design tokens
+   Inspired by nteract, screenpipe, and linear-inspired macOS designs
+   Colors: OKLCH-based, dark-first, semantic only — no decoration
+   ============================================================ */
+
+/* 1. CSS Reset & Base */
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+  }
+
+  /* System font stack — no custom webfonts */
+  html {
+    font-family: system-ui, -apple-system, BlinkMacSystemFont,
+      "Segoe UI", system-ui, "Noto Sans", sans-serif;
+  }
+
+  code,
+  kbd,
+  samp {
+    @apply font-mono;
+  }
+}
+
+/* 2. Theme Tokens (OKLCH) — light & dark */
+@layer theme {
+  :root {
+    --background: oklch(1 0 0);
+    --foreground: oklch(0.145 0 0);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.145 0 0);
+    --muted: oklch(0.97 0 0);
+    --muted-foreground: oklch(0.556 0 0);
+    --primary: oklch(0.205 0 0);
+    --primary-foreground: oklch(0.985 0 0);
+    --success: oklch(0.472 0.205 143.33);
+    --destructive: oklch(0.577 0.245 27.325);
+    --border: oklch(0.922 0 0 / 0.3);
+    --ring: oklch(0.708 0 0);
+    --radius: 0rem;
+  }
+
+  .dark {
+    --background: oklch(0.145 0 0);
+    --foreground: oklch(0.985 0 0);
+    --card: oklch(0.205 0 0);
+    --card-foreground: oklch(0.985 0 0);
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.708 0 0);
+    --primary: oklch(0.922 0 0);
+    --primary-foreground: oklch(0.205 0 0);
+    --success: oklch(0.397 0.348 157.24);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 0.1);
+    --ring: oklch(0.556 0 0);
+    --radius: 0rem;
+  }
+}
+
+/* 3. Apply tokens */
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+
+  /* Type scale — rem-based, no custom webfonts */
+  h1 { @apply text-page font-semibold tracking-tight; }
+  h2 { @apply text-section font-semibold; }
+  h3 { @apply text-card font-medium; }
+  p,
+  li,
+  dd { @apply text-body leading-relaxed; }
+  small,
+  .caption { @apply text-caption; }
+  .micro { @apply text-micro uppercase tracking-wide; }
+  .badge { @apply text-badge; }
+
+  /* Monospace only for code/technical elements */
+  code,
+  kbd,
+  samp,
+  pre {
+    @apply font-mono;
+  }
+
+  /* Buttons — fixed height, fixed radius 0 */
+  button {
+    @apply rounded-0 inline-block align-middle inline-flex items-center justify-center;
+    &:focus-visible { @apply outline-none ring-primary ring-2; }
+    &:disabled { @apply opacity-50 cursor-not-allowed; }
+  }
+
+  /* Inputs */
+  input,
+  select,
+  textarea {
+    @apply rounded-0 appearance-none block w-full px-3 py-2 text-body
+      focus:bg-transparent focus:ring-primary focus:ring-2 outline-none;
+    &:disabled { @apply opacity-50 cursor-not-allowed; }
+  }
+
+  /* Badges */
+  .badge {
+    @apply inline-flex items-center rounded-0 px-2 py-1 text-micro font-medium;
+  }
+
+  /* Lists & Rows */
+  .list-row {
+    @apply h-8 py-1 hover:bg-muted/20 transition-colors;
+  }
+  .list-row--active { @apply bg-primary/10; }
+
+  /* Tables */
+  table { @apply w-full caption-bottom; }
+  th,
+  td { @apply p-1 text-body align-middle; }
+  tr:nth-child(even) { @apply bg-muted/20; }
+}
+
+/* 3. Focus rings — always visible */
+*:focus-visible {
+  @apply outline-none ring-primary ring-2 bg-primary/10;
+}
+
+/* 4. Selection */
+::selection {
+  @apply bg-primary/20 text-primary-foreground;
+}
+
+/* 5. Media elements */
+img {
+  @apply block max-w-full height-auto;
+}
