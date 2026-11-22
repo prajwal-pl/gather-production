@@ -111,11 +111,14 @@ function statusParam(status?: string): string | null {
   return status;
 }
 
+function rpc<T>(method: string, params?: Record<string, unknown>): Promise<T> {
+  return invoke<T>("engine_rpc", { method, params: params ?? {} });
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export const engine = {
-  status: async (): Promise<EngineStatus> =>
-    invoke<EngineStatus>("engine_status_cmd"),
+  status: async (): Promise<EngineStatus> => rpc<EngineStatus>("health"),
 
   /** True when the child process is alive (does not round-trip to Python). */
   running: async (): Promise<boolean> => invoke<boolean>("engine_running"),
@@ -124,46 +127,35 @@ export const engine = {
   diagnostics: async (): Promise<string> => invoke<string>("engine_diagnostics"),
 
   /** Payload of the last `engine.ready` event, if one was seen. */
-  info: async (): Promise<EngineInfo | null> =>
-    invoke<EngineInfo | null>("engine_info_cmd"),
+  info: async (): Promise<EngineInfo | null> => rpc<EngineInfo | null>("health"),
 
   onboarding_status: async (): Promise<{ onboarded: boolean; needs_onboarding: boolean }> => {
     const isDone = typeof window !== "undefined" && window.localStorage.getItem("gather_onboarded") === "true";
-    return {
-      onboarded: isDone,
-      needs_onboarding: !isDone,
-    };
+    return { onboarded: isDone, needs_onboarding: !isDone };
   },
 
   restart: async (): Promise<void> => invoke<void>("engine_restart_cmd"),
 
   tasks: {
     list: async (status?: string): Promise<{ tasks: Task[] }> =>
-      invoke<{ tasks: Task[] }>("tasks_list_cmd", { status: statusParam(status) }),
+      rpc<{ tasks: Task[] }>("tasks.list", { status: statusParam(status) }),
 
     update: async (id: string, status: TaskStatus): Promise<{ task: Task }> =>
-      invoke<{ task: Task }>("tasks_update_cmd", { task_id: id, status }),
+      rpc<{ task: Task }>("tasks.update", { task_id: id, status }),
   },
 
   proposals: {
     list: async (status?: "pending" | "approved" | "rejected"): Promise<{ proposals: Proposal[] }> =>
-      invoke<{ proposals: Proposal[] }>("proposals_list_cmd", {
-        status: status ?? "pending",
-      }),
+      rpc<{ proposals: Proposal[] }>("proposals.list", { status: status ?? "pending" }),
 
     approve: async (
       proposal_id: string,
       approved_indices?: number[],
     ): Promise<{ already: boolean; status: string; created?: unknown[] }> =>
-      invoke<{ already: boolean; status: string; created?: unknown[] }>(
-        "proposals_approve_cmd",
-        { proposal_id, approved_indices },
-      ),
+      rpc("proposals.approve", { proposal_id, approved_indices }),
 
     reject: async (proposal_id: string): Promise<{ already: boolean; status: string }> =>
-      invoke<{ already: boolean; status: string }>("proposals_reject_cmd", {
-        proposal_id,
-      }),
+      rpc("proposals.reject", { proposal_id }),
   },
 
   connections: {
@@ -171,11 +163,11 @@ export const engine = {
       connections: Connection[];
       providers: string[];
       credentials: Record<string, boolean>;
-    }> => invoke("connections_list_cmd"),
+    }> => rpc("connections.list"),
   },
 
   scheduler: {
     runNow: async (): Promise<{ accepted: boolean; events?: number }> =>
-      invoke<{ accepted: boolean; events?: number }>("scheduler_run_now_cmd"),
+      rpc("sync.now"),
   },
 };

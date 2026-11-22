@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "gather.desktop",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": ". /home/prajwal/code/projects/gather/.venv/bin/activate && PYTHONPATH=$(pwd)/src pnpm dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "pnpm build",
     "frontendDist": "../dist"
