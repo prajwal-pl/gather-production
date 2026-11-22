@@ -178,6 +178,29 @@ Methods: `health`, `engine.shutdown`, `settings.get/update`,
 `runs.list/get/cancel`, `tasks.list/get/update`,
 `proposals.list/get/approve/reject`, `models.check/usage`, `scheduler.status`.
 
+### How the Tauri shell launches it (`apps/desktop`)
+
+In development the shell resolves the interpreter itself: it prefers
+`<repo>/.venv/bin/python` (the only one with the dependencies), sets
+`PYTHONPATH=<repo>/src`, runs from the repository root and passes `--secrets
+file`. A release build prefers a `gather-engine` sidecar next to the executable
+(Phase 5) and only then falls back to an interpreter.
+
+| Variable | Effect |
+|---|---|
+| `GATHER_PYTHON` | interpreter to use instead of the project venv |
+| `GATHER_ENGINE` | a `gather-engine` binary; bypasses interpreter resolution |
+| `GATHER_DATA_DIR` | passed through as `--data-dir` |
+| `GATHER_FIXTURE=1` | adds `--fixture` (offline connectors + model) |
+| `GATHER_SCHEDULER=1` | enables the background poller (off in dev by default) |
+| `GATHER_SECRETS` | `auto` (default in release) / `file` (default in dev) / `env` |
+| `GATHER_DEBUG_IPC=1` | log every request/response line to the shell's stderr |
+
+If the engine stops, the shell keeps the last 40 stderr lines and exposes them
+through `engine_diagnostics`; the UI polls `health` every 5 s and shows the
+reason next to the status pill. The supervisor restarts a crashed engine up to
+ten times and resets the counter on `engine.ready`.
+
 The scheduler is one non-overlapping tick: poll due connections, run the overdue
 sweep when due, announce new proposals, then wait. It catches up immediately
 after start or sleep. A tick is a cancellable run; cancellation stops at the

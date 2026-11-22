@@ -696,13 +696,25 @@ Packaging decisions:
 12. ✔ One engine per workspace: `lock.py` advisory lock released by the OS on
     crash. UTF-8 stdio, redacted rotated logs, SIGTERM/SIGINT shutdown.
     Continued in Phase 4 (`13` onward).
-    Verified by 61 tests, including a subprocess that spawns the engine and
+    Verified by 63 tests, including a subprocess that spawns the engine and
     performs ingest → proposal → approve → tasks over JSON lines.
 
 **Phase 4 — Tauri shell**
-13. `apps/desktop/` (Rust + web UI), sidecar config, tray, single instance,
-    power events, deep links.
-14. Approval inbox → tasks → meeting detail → connections → settings.
+13. ✔ `apps/desktop/` (Rust + web UI), sidecar config, engine supervision,
+    stdio transport. Dev mode runs the project virtualenv (`GATHER_PYTHON`,
+    `GATHER_ENGINE`, `GATHER_DATA_DIR`, `GATHER_FIXTURE`, `GATHER_SCHEDULER`
+    override); release mode prefers a `gather-engine` sidecar next to the
+    executable.
+    The shell owns request/response correlation (`id` + `oneshot` + timeout),
+    so commands return the engine's `result` directly and the web UI never
+    has to subscribe to transport events. Engine stderr is captured for
+    `engine_diagnostics`, and the supervisor restarts a crashed engine up to
+    ten times, resetting the counter on `engine.ready`.
+14. ✔ Approval inbox → tasks → connections → "Sync now".
+    Settings persistence is still a placeholder in the web UI.
+    Verified by `cargo test` (spawn → health → ingest → propose → approve a
+    selected subset → tasks) and by 63 Python tests.
+    Remaining for this phase: tray, single instance, power events, deep links.
 
 **Phase 5 — packaging**
 15. PyInstaller spec, dependency trim, per-OS CI, signing/notarization, updater.

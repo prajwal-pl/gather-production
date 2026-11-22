@@ -332,6 +332,34 @@ def test_meeting_ingest_approve_is_end_to_end_and_idempotent(handlers, runtime):
     assert detail["tasks"]
 
 
+def test_approve_with_selected_indices_creates_only_those_tasks(handlers, runtime):
+    call(handlers, "meetings.ingest", {"external_id": "ff_fixture"})
+    proposal = call(handlers, "proposals.list")["proposals"][0]
+    cards = proposal["payload"]["tasks"]
+    assert len(cards) >= 2, "fixture meeting should propose several commitments"
+
+    approved = call(
+        handlers,
+        "proposals.approve",
+        {"proposal_id": proposal["id"], "approved_indices": [0]},
+    )
+    assert approved["already"] is False
+    assert len(approved["created"]) == 1
+    assert approved["created"][0]["title"] == cards[0]["title"]
+
+
+def test_approve_rejects_non_integer_indices(handlers, runtime):
+    call(handlers, "meetings.ingest", {"external_id": "ff_fixture"})
+    proposal = call(handlers, "proposals.list")["proposals"][0]
+    with pytest.raises(RpcError):
+        call(
+            handlers,
+            "proposals.approve",
+            {"proposal_id": proposal["id"], "approved_indices": ["nope"]},
+        )
+    assert call(handlers, "proposals.list")["proposals"][0]["status"] == "pending"
+
+
 def test_approve_recovers_when_the_graph_finished_before_the_decision(handlers, runtime):
     from gather.graphs import resume_meeting
 

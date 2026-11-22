@@ -1,19 +1,20 @@
 /**
  * Shared primitive UI components used across all views.
- * Plain HTML + Tailwind — no external component library dependency.
+ * Plain HTML + Tailwind with clean OKLCH design tokens.
  */
 import React from "react";
 
 // ─── Badge ───────────────────────────────────────────────────────────────────
 
-type BadgeVariant = "default" | "success" | "warn" | "error" | "muted";
+export type BadgeVariant = "default" | "success" | "warn" | "error" | "muted" | "accent";
 
 const BADGE_STYLES: Record<BadgeVariant, string> = {
-  default: "bg-[oklch(var(--primary)/0.1)] text-[oklch(var(--primary))]",
-  success: "bg-[oklch(var(--success)/0.12)] text-[oklch(var(--success))]",
-  warn:    "bg-[oklch(0.72_0.18_80/0.15)] text-[oklch(0.55_0.18_80)]",
-  error:   "bg-[oklch(var(--destructive)/0.12)] text-[oklch(var(--destructive))]",
-  muted:   "bg-[oklch(var(--muted))] text-[oklch(var(--muted-foreground))]",
+  default: "bg-[oklch(var(--primary)/0.08)] text-[oklch(var(--primary))] border-[oklch(var(--primary)/0.18)]",
+  success: "bg-[oklch(var(--success)/0.12)] text-[oklch(var(--success))] border-[oklch(var(--success)/0.25)]",
+  warn:    "bg-[oklch(0.72_0.18_80/0.14)] text-[oklch(0.55_0.18_80)] border-[oklch(0.72_0.18_80/0.25)]",
+  error:   "bg-[oklch(var(--destructive)/0.12)] text-[oklch(var(--destructive))] border-[oklch(var(--destructive)/0.25)]",
+  muted:   "bg-[oklch(var(--muted)/0.7)] text-[oklch(var(--muted-foreground))] border-[oklch(var(--border)/0.5)]",
+  accent:  "bg-[oklch(var(--accent)/0.12)] text-[oklch(var(--accent))] border-[oklch(var(--accent)/0.25)]",
 };
 
 export function Badge({
@@ -27,7 +28,7 @@ export function Badge({
 }) {
   return (
     <span
-      className={`inline-flex items-center px-2 py-0.5 text-[0.6875rem] font-medium uppercase tracking-wide leading-none ${BADGE_STYLES[variant]} ${className}`}
+      className={`inline-flex items-center gap-1 px-2.5 py-0.5 text-[0.6875rem] font-medium tracking-wide rounded-full border transition-colors ${BADGE_STYLES[variant]} ${className}`}
     >
       {children}
     </span>
@@ -36,20 +37,22 @@ export function Badge({
 
 // ─── Button ──────────────────────────────────────────────────────────────────
 
-type ButtonVariant = "primary" | "ghost" | "outline" | "danger";
+export type ButtonVariant = "primary" | "ghost" | "outline" | "danger" | "accent";
 
 const BTN_BASE =
-  "inline-flex items-center justify-center gap-1.5 h-8 px-3 text-[0.8125rem] font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[oklch(var(--primary))]";
+  "inline-flex items-center justify-center gap-1.5 h-8 px-3.5 text-[0.8125rem] font-medium rounded-lg transition-all duration-150 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[oklch(var(--primary))] shadow-sm";
 
 const BTN_VARIANT: Record<ButtonVariant, string> = {
   primary:
-    "bg-[oklch(var(--primary))] text-[oklch(var(--primary-foreground))] hover:bg-[oklch(var(--primary)/0.85)]",
+    "bg-[oklch(var(--primary))] text-[oklch(var(--primary-foreground))] hover:bg-[oklch(var(--primary)/0.88)] shadow-[oklch(var(--primary)/0.15)]",
   ghost:
-    "bg-transparent hover:bg-[oklch(var(--muted))] text-[oklch(var(--foreground))]",
+    "bg-transparent hover:bg-[oklch(var(--muted)/0.8)] text-[oklch(var(--foreground))] shadow-none",
   outline:
-    "border border-[oklch(var(--border)/0.4)] bg-transparent hover:bg-[oklch(var(--muted))] text-[oklch(var(--foreground))]",
+    "border border-[oklch(var(--border))] bg-[oklch(var(--card))] hover:bg-[oklch(var(--muted)/0.6)] text-[oklch(var(--foreground))]",
   danger:
-    "bg-[oklch(var(--destructive)/0.1)] text-[oklch(var(--destructive))] hover:bg-[oklch(var(--destructive)/0.2)] border border-[oklch(var(--destructive)/0.3)]",
+    "bg-[oklch(var(--destructive)/0.1)] text-[oklch(var(--destructive))] hover:bg-[oklch(var(--destructive)/0.18)] border border-[oklch(var(--destructive)/0.25)] shadow-none",
+  accent:
+    "bg-[oklch(var(--accent))] text-[oklch(var(--accent-foreground))] hover:bg-[oklch(var(--accent)/0.88)]",
 };
 
 export function Button({
@@ -81,14 +84,14 @@ export function Button({
 
 // ─── Spinner ─────────────────────────────────────────────────────────────────
 
-export function Spinner({ size = 16 }: { size?: number }) {
+export function Spinner({ size = 16, className = "" }: { size?: number; className?: string }) {
   return (
     <svg
       width={size}
       height={size}
       viewBox="0 0 24 24"
       fill="none"
-      className="animate-spin text-[oklch(var(--muted-foreground))]"
+      className={`animate-spin text-current ${className}`}
     >
       <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" strokeOpacity="0.25" />
       <path
@@ -107,28 +110,33 @@ export function EmptyState({
   icon,
   title,
   description,
+  action,
 }: {
   icon: React.ReactNode;
   title: string;
   description?: string;
+  action?: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">
-      <div className="text-[oklch(var(--muted-foreground))] opacity-40">{icon}</div>
-      <p className="text-[0.875rem] font-medium text-[oklch(var(--foreground))]">{title}</p>
+    <div className="flex flex-col items-center justify-center gap-3 py-16 px-4 text-center animate-fade-in">
+      <div className="text-[oklch(var(--muted-foreground))] opacity-50 p-3 rounded-2xl bg-[oklch(var(--muted)/0.5)] border border-[oklch(var(--border)/0.5)]">
+        {icon}
+      </div>
+      <p className="text-[0.9375rem] font-medium text-[oklch(var(--foreground))]">{title}</p>
       {description && (
-        <p className="text-[0.75rem] text-[oklch(var(--muted-foreground))] max-w-xs">
+        <p className="text-[0.8125rem] text-[oklch(var(--muted-foreground))] max-w-sm leading-relaxed">
           {description}
         </p>
       )}
+      {action && <div className="mt-2">{action}</div>}
     </div>
   );
 }
 
 // ─── Divider ─────────────────────────────────────────────────────────────────
 
-export function Divider() {
-  return <hr className="border-[oklch(var(--border)/0.3)]" />;
+export function Divider({ className = "" }: { className?: string }) {
+  return <hr className={`border-[oklch(var(--border)/0.5)] my-2 ${className}`} />;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

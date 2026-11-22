@@ -43,15 +43,15 @@ function TaskRow({
 
   return (
     <div
-      className={`border-b border-[oklch(var(--border)/0.2)] last:border-0 ${
-        task.status === "done" ? "opacity-50" : ""
+      className={`border-b border-[oklch(var(--border)/0.5)] last:border-0 transition-colors ${
+        task.status === "done" ? "opacity-55" : ""
       }`}
     >
       <div
-        className="flex items-start gap-3 px-4 py-3 hover:bg-[oklch(var(--muted)/0.3)] cursor-pointer transition-colors"
+        className="flex items-start gap-3.5 px-4 py-3 hover:bg-[oklch(var(--muted)/0.35)] cursor-pointer transition-colors"
         onClick={() => setExpanded((e) => !e)}
       >
-        {/* Status select */}
+        {/* Status select dropdown */}
         <select
           value={task.status}
           onClick={(e) => e.stopPropagation()}
@@ -59,7 +59,7 @@ function TaskRow({
             e.stopPropagation();
             onStatusChange(task.id, e.target.value as TaskStatus);
           }}
-          className="mt-0.5 text-[0.6875rem] border border-[oklch(var(--border)/0.3)] bg-[oklch(var(--card))] text-[oklch(var(--foreground))] px-1.5 py-0.5 h-5 leading-none flex-none appearance-none cursor-pointer"
+          className="mt-0.5 text-[0.6875rem] font-medium border border-[oklch(var(--border))] bg-[oklch(var(--card))] text-[oklch(var(--foreground))] px-2 py-0.5 h-6 rounded-md leading-none flex-none appearance-none cursor-pointer hover:border-[oklch(var(--primary)/0.4)] transition-colors focus:outline-none"
         >
           {Object.entries(STATUS_LABELS).map(([value, label]) => (
             <option key={value} value={value}>
@@ -79,7 +79,7 @@ function TaskRow({
           >
             {task.title}
           </p>
-          <div className="flex items-center gap-3 mt-1 flex-wrap">
+          <div className="flex items-center gap-3 mt-1.5 flex-wrap">
             {task.owner_email && (
               <span className="flex items-center gap-1 text-[0.75rem] text-[oklch(var(--muted-foreground))]">
                 <User size={11} />
@@ -90,7 +90,7 @@ function TaskRow({
               <span
                 className={`flex items-center gap-1 text-[0.75rem] ${
                   overdue
-                    ? "text-[oklch(var(--destructive))] font-medium"
+                    ? "text-[oklch(var(--destructive))] font-semibold"
                     : "text-[oklch(var(--muted-foreground))]"
                 }`}
               >
@@ -106,15 +106,15 @@ function TaskRow({
 
       {/* Expanded detail */}
       {expanded && (task.detail || task.source_quote) && (
-        <div className="px-4 pb-3 ml-[calc(2rem+0.75rem)] space-y-2">
+        <div className="px-4 pb-3.5 ml-10 space-y-2 animate-fade-in">
           {task.detail && (
             <p className="text-[0.75rem] text-[oklch(var(--muted-foreground))] leading-relaxed">
               {task.detail}
             </p>
           )}
           {task.source_quote && (
-            <div className="flex gap-2">
-              <Quote size={12} className="flex-none mt-0.5 text-[oklch(var(--muted-foreground))] opacity-50" />
+            <div className="flex gap-2 p-2.5 rounded-lg bg-[oklch(var(--muted)/0.3)] border border-[oklch(var(--border)/0.5)]">
+              <Quote size={12} className="flex-none mt-0.5 text-[oklch(var(--accent))]" />
               <blockquote className="text-[0.75rem] text-[oklch(var(--muted-foreground))] italic leading-relaxed">
                 "{task.source_quote}"
               </blockquote>
@@ -147,7 +147,6 @@ export function TasksView() {
 
   async function handleStatusChange(id: string, status: TaskStatus) {
     await engine.tasks.update(id, status);
-    // Optimistic update
     setTasks((ts) => ts.map((t) => (t.id === id ? { ...t, status } : t)));
   }
 
@@ -157,34 +156,34 @@ export function TasksView() {
   ).length;
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full bg-[oklch(var(--background))]">
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-6 py-3 border-b border-[oklch(var(--border)/0.2)]">
+      <div className="flex items-center justify-between px-6 py-4 border-b border-[oklch(var(--border))]">
         <div>
-          <h2 className="text-[0.9375rem] font-semibold text-[oklch(var(--foreground))]">
-            Tasks
+          <h2 className="text-sm font-semibold text-[oklch(var(--foreground))] tracking-tight">
+            Tracked Tasks
           </h2>
           {!loading && (
-            <p className="text-[0.75rem] text-[oklch(var(--muted-foreground))] mt-0.5">
+            <p className="text-xs text-[oklch(var(--muted-foreground))] mt-0.5">
               {open} open{overdue > 0 ? ` · ${overdue} overdue` : ""}
             </p>
           )}
         </div>
-        <Button variant="ghost" onClick={() => load(filter)} disabled={loading}>
-          {loading ? <Spinner size={13} /> : null}
+        <Button variant="outline" onClick={() => load(filter)} disabled={loading} className="text-xs h-8">
+          {loading ? <Spinner size={12} /> : null}
           Refresh
         </Button>
       </div>
 
       {/* Filter tabs */}
-      <div className="flex border-b border-[oklch(var(--border)/0.2)] px-6">
+      <div className="flex border-b border-[oklch(var(--border))] px-6 gap-1 bg-[oklch(var(--card))]">
         {FILTERS.map((f) => (
           <button
             key={f.value}
             onClick={() => setFilter(f.value)}
-            className={`px-3 py-2 text-[0.75rem] font-medium border-b-2 transition-colors ${
+            className={`px-3 py-2.5 text-xs font-medium border-b-2 transition-all ${
               filter === f.value
-                ? "border-[oklch(var(--primary))] text-[oklch(var(--foreground))]"
+                ? "border-[oklch(var(--primary))] text-[oklch(var(--foreground))] font-semibold"
                 : "border-transparent text-[oklch(var(--muted-foreground))] hover:text-[oklch(var(--foreground))]"
             }`}
           >
@@ -193,20 +192,20 @@ export function TasksView() {
         ))}
       </div>
 
-      {/* Task list */}
-      <div className="flex-1 overflow-y-auto">
+      {/* Task list container */}
+      <div className="flex-1 overflow-y-auto p-6">
         {loading ? (
-          <div className="flex justify-center py-16">
+          <div className="flex justify-center py-20">
             <Spinner size={24} />
           </div>
         ) : tasks.length === 0 ? (
           <EmptyState
-            icon={<ListChecks size={48} />}
-            title="No tasks"
-            description="Approve commitments from the inbox to populate this list."
+            icon={<ListChecks size={36} />}
+            title="No tasks match filter"
+            description="Approve extracted commitments from the Inbox to track follow-up tasks."
           />
         ) : (
-          <div>
+          <div className="border border-[oklch(var(--border))] bg-[oklch(var(--card))] rounded-xl shadow-xs overflow-hidden divide-y divide-[oklch(var(--border)/0.5)]">
             {tasks.map((task) => (
               <TaskRow key={task.id} task={task} onStatusChange={handleStatusChange} />
             ))}

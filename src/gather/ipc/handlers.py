@@ -7,6 +7,7 @@ keeps HTTP (dev), CLI and stdio behaving the same way.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 import uuid
@@ -131,6 +132,13 @@ class Handlers:
         router.register("models.check", self.models_check, slow=True)
         router.register("models.usage", self.models_usage)
         router.register("scheduler.status", self.scheduler_status)
+
+        # ─── onboarding ───────────────────────────────────────────────── #
+        router.register("onboarding.status", self.onboarding_status)
+        router.register("onboarding.complete", self.onboarding_complete)
+
+        # ─── connections.connect (slow: OAuth flow, API key exchange) ─── #
+        router.register("connections.connect", self.connections_connect, slow=True)
 
     # -- helpers ----------------------------------------------------------- #
 
@@ -416,6 +424,189 @@ class Handlers:
         self._emit("connections.tested", payload)
         return payload
 
+    def onboarding_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        settings = self.runtime.settings
+        onboarded = settings.onboarded.unwrap_or(False)
+        conn_rows = self.runtime.store.connections(self.org, status=None)
+        connections = len(conn_rows) if conn_rows else 0
+
+        keys = {**self.keys}
+        google_configured = (
+            keys.get("GOOGLE_CLIENT_ID")
+            and not keys.get("GOOGLE_CLIENT_ID", "").strip().is_empty()
+        )
+
+        # Model configured means at least one model in chain has its key present
+        from ..config import PROVIDER_KEY_ENV
+        live_models = tuple(
+            spec for spec in settings.chain
+            if os.environ.get(PROVIDER_KEY_ENV[spec.provider])
+        )
+        model_configured = len(live_models) > 0
+
+        return {
+            "ok": True,
+            "needs_onboarding": not onboarded and connections == 0,
+            "onboarded": onboarded,
+            "connections": connections,
+            "google_configured": google_configured,
+            "model_configured": model_configured,
+        }
+
+    def onboarding_complete(self, params: dict[str, Any]) -> dict[str, Any]:
+        # Write the onboarding flag via the secret store
+        store = self.secret_store
+        if store is not None and store.writable:
+            store.set("GATHER_ONBOARDED", "1")
+
+        # Update in-memory settings
+        self.runtime.settings.onboarded = True
+
+        # Emit signal so UI can reset
+        self._emit("onboarding.completed", {})
+
+        return {"ok": True, "onboarded": True}
+
+    def connections_connect(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Connect a provider.
+
+        Two supported providers:
+        - "gmail": runs the interactive OAuth 2.0 flow (slow, opens browser)
+        - "fireflies": validates and stores an API key
+        """
+        provider = params.get("provider")
+        if not provider:
+            raise RpcError("invalid_params", "provider is required")
+
+        if provider == "gmail":
+            return self._connect_gmail_oauth(params)
+
+        if provider == "fireflies":
+            return self._connect_fireflies(params)
+
+        raise RpcError("invalid_params", f"unknown provider: {provider}")
+
+    def _connect_gmail_oauth(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Run the Gmail OAuth flow and upsert the connection.
+
+        This is a slow operation because it involves a browser redirect.
+        """
+        from .. import __version__
+        from ..config import PROVIDER_KEY_ENV, default_data_dir
+        from ..secrets import SECRET_KEYS
+        import os
+
+        org = self.org
+
+        # Read Google client credentials from the engine's secret keys.
+        # Fall back to settings if not in keys (e.g. first-run dev).
+        keys = dict(self.keys)  # copy
+        client_id = keys.get("GOOGLE_CLIENT_ID") or os.environ.get("GOOGLE_CLIENT_ID", "")
+        client_secret = keys.get("GOOGLE_CLIENT_SECRET") or os.environ.get("GOOGLE_CLIENT_SECRET", "")
+
+        if not client_id or not client_secret:
+            raise RpcError(
+                "unauthorized",
+                "Google sign-in is not configured in this build. "
+                "Add GOOGLE_CLIENT_ID/SECRET to the environment or secret store.",
+            )
+
+        # Run the OAuth flow using the oauth module
+        from ..oauth import connect_gmail_oauth as _oauth_connect
+
+        try:
+            tokens = _oauth_connect(
+                client_id=client_id,
+                client_secret=client_secret,
+                timeout=240,
+                open_browser=False,  # we handle the browser from the Rust side or engine process
+            )
+        except Exception as exc:  # noqa: BLE001 - flow cancelled / timed out
+            raise RpcError("oauth_failed", f"OAuth flow failed: {exc}") from exc
+
+        # Store the refresh token in the secret store so the connector picks it up
+        refresh_token = tokens.get("refresh_token") or ""
+        if store is not None and store.writable:
+            store.set("GMAIL_REFRESH_TOKEN", refresh_token)
+        self.keys["GMAIL_REFRESH_TOKEN"] = refresh_token
+
+        # Upsert the connection as a user-mode Gmail connection with the email as user_id
+        user_email = tokens.get("user_email") or "gmail-user"
+        # Ensure the user exists in the store
+        users = self.runtime.store.users(org)
+        user_match = next(
+            (u for u in users if u.get("id") == user_email or u.get("email") == user_email),
+            None,
+        )
+        user_id = user_match["id"] if user_match else self.runtime.store.upsert_user(org, user_email, user_email)
+
+        connection_id = self.runtime.store.upsert_connection(
+            org,
+            "gmail",
+            mode="user",
+            user_id=str(user_id),
+            scopes=[
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/gmail.send",
+                "https://www.googleapis.com/auth/gmail.modify",
+            ],
+        )
+        # Make sure it's active
+        self.runtime.store.set_connection_status(connection_id, "active")
+
+        connection = self.runtime.store.get_connection(connection_id)
+
+        self._emit(
+            "connections.changed",
+            {"connection_id": connection_id, "provider": "gmail", "action": "added"},
+        )
+
+        return {
+            "provider": "gmail",
+            "mode": "user",
+            "user_email": user_email,
+            "refresh_token": refresh_token,
+            "ok": True,
+        }
+
+    def _connect_fireflies(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Validate and store a Fireflies API key, upsert the connection."""
+        api_key = params.get("api_key") or ""
+        if not api_key:
+            raise RpcError("invalid_params", "Fireflies API key is required")
+
+        org = self.org
+
+        # Upsert a Fireflies connection (org mode)
+        connection_id = self.runtime.store.upsert_connection(
+            org,
+            "fireflies",
+            mode="org",
+            user_id=None,
+            scopes=[],
+        )
+        # Make sure it's active
+        self.runtime.store.set_connection_status(connection_id, "active")
+
+        connection = self.runtime.store.get_connection(connection_id)
+
+        # Store the API key in the secret store
+        if self.secret_store is not None and self.secret_store.writable:
+            self.secret_store.set("FIREFLIES_API_KEY", api_key)
+        self.keys["FIREFLIES_API_KEY"] = api_key
+
+        self._emit(
+            "connections.changed",
+            {"connection_id": connection_id, "provider": "fireflies", "action": "added"},
+        )
+
+        return {
+            "provider": "fireflies",
+            "mode": "org",
+            "api_key": api_key,
+            "ok": True,
+        }
+
     def sync_now(self, params: dict[str, Any]) -> dict[str, Any]:
         if self.scheduler is not None:
             result = self.scheduler.run_now(block=False)
@@ -678,6 +869,21 @@ class Handlers:
             if kind == "task_approval":
                 tasks = (proposal.get("payload") or {}).get("tasks", [])
                 approved = params.get("approved")
+                if approved is None and params.get("approved_indices") is not None:
+                    # The desktop UI selects rows; the graph speaks fingerprints.
+                    indices = params["approved_indices"]
+                    if not isinstance(indices, list) or not all(
+                        isinstance(index, int) and not isinstance(index, bool)
+                        for index in indices
+                    ):
+                        raise RpcError(
+                            "invalid_params", "approved_indices must be a list of integers"
+                        )
+                    approved = [
+                        tasks[index]["fingerprint"]
+                        for index in indices
+                        if 0 <= index < len(tasks) and tasks[index].get("fingerprint")
+                    ]
                 if approved is None:
                     approved = [task["fingerprint"] for task in tasks]
                 thread_id = proposal.get("thread_id")

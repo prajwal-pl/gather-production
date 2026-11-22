@@ -52,6 +52,7 @@ STORED_SETTINGS: dict[str, tuple[str, Callable[[str], Any]]] = {
     ),
     "GATHER_POLL_INTERVAL": ("poll_interval_s", float),
     "GATHER_SWEEP_INTERVAL": ("sweep_interval_s", float),
+    "GATHER_ONBOARDED": ("onboarded", lambda raw: raw.strip().lower() in {"1", "true", "yes", "on"}),
 }
 
 
