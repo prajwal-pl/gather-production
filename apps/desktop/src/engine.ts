@@ -115,6 +115,8 @@ function rpc<T>(method: string, params?: Record<string, unknown>): Promise<T> {
   return invoke<T>("engine_rpc", { method, params: params ?? {} });
 }
 
+export { rpc as engineRpc };
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 export const engine = {
@@ -129,12 +131,13 @@ export const engine = {
   /** Payload of the last `engine.ready` event, if one was seen. */
   info: async (): Promise<EngineInfo | null> => rpc<EngineInfo | null>("health"),
 
-  onboarding_status: async (): Promise<{ onboarded: boolean; needs_onboarding: boolean }> => {
-    const isDone = typeof window !== "undefined" && window.localStorage.getItem("gather_onboarded") === "true";
-    return { onboarded: isDone, needs_onboarding: !isDone };
-  },
+  onboarding_status: async (): Promise<{ onboarded: boolean; needs_onboarding: boolean }> =>
+    rpc<{ onboarded: boolean; needs_onboarding: boolean }>("onboarding.status"),
 
-  restart: async (): Promise<void> => invoke<void>("engine_restart_cmd"),
+  onboarding_complete: async (params?: { org_name?: string }): Promise<{ ok: boolean }> =>
+    rpc<{ ok: boolean }>("onboarding.complete", params ?? {}),
+
+  restart: async (): Promise<void> => { /* no-op: engine restarts are handled by the Tauri supervisor */ },
 
   tasks: {
     list: async (status?: string): Promise<{ tasks: Task[] }> =>
@@ -164,6 +167,12 @@ export const engine = {
       providers: string[];
       credentials: Record<string, boolean>;
     }> => rpc("connections.list"),
+
+    connect: async (
+      provider: "gmail" | "fireflies",
+      params?: Record<string, unknown>,
+    ): Promise<{ ok: boolean; user_email?: string; provider: string }> =>
+      rpc("connections.connect", { provider, ...params }),
   },
 
   scheduler: {

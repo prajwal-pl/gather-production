@@ -27,6 +27,7 @@ import {
   Cpu,
 } from "lucide-react";
 import { Badge, Button, Spinner } from "./ui";
+import { engine } from "../engine";
 
 export interface OnboardingData {
   name: string;
@@ -117,11 +118,12 @@ export function OnboardingView({ onComplete }: { onComplete: () => void }) {
   // App selection state (ticked apps)
   const [selectedApps, setSelectedApps] = useState<string[]>(["fireflies", "gmail", "offline_files"]);
 
-  // Connection auth simulation state
+  // Connection auth state
   const [connectedApps, setConnectedApps] = useState<Record<string, boolean>>({
     offline_files: true,
   });
   const [connectingApp, setConnectingApp] = useState<string | null>(null);
+  const [connectError, setConnectError] = useState<Record<string, string>>({});
   const [firefliesKey, setFirefliesKey] = useState<string>("");
 
   // AI preferences
@@ -134,12 +136,28 @@ export function OnboardingView({ onComplete }: { onComplete: () => void }) {
     );
   };
 
-  // Simulate connecting an application
   const handleConnectApp = async (appId: string) => {
     setConnectingApp(appId);
-    await new Promise((r) => setTimeout(r, 700));
-    setConnectedApps((prev) => ({ ...prev, [appId]: true }));
-    setConnectingApp(null);
+    setConnectError((prev) => ({ ...prev, [appId]: "" }));
+    try {
+      if (appId === "gmail") {
+        await engine.connections.connect("gmail");
+      } else if (appId === "fireflies") {
+        if (!firefliesKey.trim()) {
+          setConnectError((prev) => ({ ...prev, fireflies: "API key is required" }));
+          return;
+        }
+        await engine.connections.connect("fireflies", { api_key: firefliesKey.trim() });
+      } else {
+        // calendar / slack / offline_files: not yet implemented in engine
+        await new Promise((r) => setTimeout(r, 400));
+      }
+      setConnectedApps((prev) => ({ ...prev, [appId]: true }));
+    } catch (err) {
+      setConnectError((prev) => ({ ...prev, [appId]: String(err) }));
+    } finally {
+      setConnectingApp(null);
+    }
   };
 
   // Complete onboarding
@@ -488,19 +506,24 @@ export function OnboardingView({ onComplete }: { onComplete: () => void }) {
                             <span className="text-[0.6875rem] text-[oklch(var(--accent))]">Sync cursor active (5m)</span>
                           </div>
                         ) : (
-                          <div className="flex items-center justify-between gap-3">
-                            <span className="text-[0.6875rem] text-[oklch(var(--muted-foreground))]">
-                              OAuth 2.0 with read-only inbox cursor and draft creation.
-                            </span>
-                            <Button
-                              variant="outline"
-                              onClick={() => handleConnectApp("gmail")}
-                              disabled={isConnecting}
-                              className="text-xs h-7 px-3 flex-none"
-                            >
-                              {isConnecting ? <Spinner size={12} /> : <Plug size={12} />}
-                              Authorize Gmail
-                            </Button>
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="text-[0.6875rem] text-[oklch(var(--muted-foreground))]">
+                                OAuth 2.0 — your browser will open for Google sign-in.
+                              </span>
+                              <Button
+                                variant="outline"
+                                onClick={() => handleConnectApp("gmail")}
+                                disabled={isConnecting}
+                                className="text-xs h-7 px-3 flex-none"
+                              >
+                                {isConnecting ? <Spinner size={12} /> : <Plug size={12} />}
+                                {isConnecting ? "Waiting…" : "Sign in with Google"}
+                              </Button>
+                            </div>
+                            {connectError["gmail"] && (
+                              <p className="text-[0.6875rem] text-[oklch(var(--destructive))]">{connectError["gmail"]}</p>
+                            )}
                           </div>
                         )}
                       </div>
@@ -514,23 +537,28 @@ export function OnboardingView({ onComplete }: { onComplete: () => void }) {
                             <span className="text-[0.6875rem] text-[oklch(var(--accent))]">Active</span>
                           </div>
                         ) : (
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="password"
-                              value={firefliesKey}
-                              onChange={(e) => setFirefliesKey(e.target.value)}
-                              placeholder="Paste Fireflies API Key..."
-                              className="flex-1 h-7 px-2.5 text-xs bg-[oklch(var(--card))] border border-[oklch(var(--border))] rounded-md text-[oklch(var(--foreground))] placeholder:text-[oklch(var(--muted-foreground))] focus:outline-none"
-                            />
-                            <Button
-                              variant="outline"
-                              onClick={() => handleConnectApp("fireflies")}
-                              disabled={isConnecting}
-                              className="text-xs h-7 px-3 flex-none"
-                            >
-                              {isConnecting ? <Spinner size={12} /> : <Key size={12} />}
-                              Connect API
-                            </Button>
+                          <div className="space-y-1.5">
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="password"
+                                value={firefliesKey}
+                                onChange={(e) => setFirefliesKey(e.target.value)}
+                                placeholder="Paste Fireflies API Key..."
+                                className="flex-1 h-7 px-2.5 text-xs bg-[oklch(var(--card))] border border-[oklch(var(--border))] rounded-md text-[oklch(var(--foreground))] placeholder:text-[oklch(var(--muted-foreground))] focus:outline-none"
+                              />
+                              <Button
+                                variant="outline"
+                                onClick={() => handleConnectApp("fireflies")}
+                                disabled={isConnecting || !firefliesKey.trim()}
+                                className="text-xs h-7 px-3 flex-none"
+                              >
+                                {isConnecting ? <Spinner size={12} /> : <Key size={12} />}
+                                Connect API
+                              </Button>
+                            </div>
+                            {connectError["fireflies"] && (
+                              <p className="text-[0.6875rem] text-[oklch(var(--destructive))]">{connectError["fireflies"]}</p>
+                            )}
                           </div>
                         )}
                       </div>

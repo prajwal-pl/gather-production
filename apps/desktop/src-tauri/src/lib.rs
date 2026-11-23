@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::oneshot;
+
+static RPC_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 // ─── Engine process state ────────────────────────────────────────────────────
 
@@ -35,8 +38,26 @@ fn spawn_engine(app: &AppHandle) -> Result<(), String> {
         if cfg!(target_os = "windows") { "python".into() } else { "python3".into() }
     });
 
+    // Build args from env vars — nothing is hardcoded so real credentials work.
+    let mut args = vec!["-m".to_string(), "gather.engine".to_string()];
+    if std::env::var("GATHER_FIXTURE").as_deref() == Ok("1") {
+        args.push("--fixture".to_string());
+    }
+    // Scheduler off by default in dev; set GATHER_SCHEDULER=1 to enable.
+    if std::env::var("GATHER_SCHEDULER").as_deref() != Ok("1") {
+        args.push("--no-scheduler".to_string());
+    }
+    if let Ok(data_dir) = std::env::var("GATHER_DATA_DIR") {
+        args.push("--data-dir".to_string());
+        args.push(data_dir);
+    }
+    if let Ok(secrets) = std::env::var("GATHER_SECRETS") {
+        args.push("--secrets".to_string());
+        args.push(secrets);
+    }
+
     let mut child = Command::new(&python)
-        .args(["-m", "gather.engine", "--fixture", "--no-scheduler"])
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -100,7 +121,6 @@ fn spawn_engine(app: &AppHandle) -> Result<(), String> {
 // ─── Tauri commands ──────────────────────────────────────────────────────────
 
 /// Send a raw JSON-lines request to the engine stdin.
-/// The frontend generates request ids and listens for engine:response events.
 #[tauri::command]
 fn engine_send(
     payload: String,
@@ -120,44 +140,48 @@ fn engine_send(
 }
 
 /// Generic async RPC: send a request to the engine and await the correlated response.
+///
+/// The EngineState lock is dropped BEFORE awaiting the oneshot — holding it
+/// across .await would deadlock because the stdout reader thread needs to lock
+/// `pending` (inside EngineState) to deliver the response.
 #[tauri::command]
 async fn engine_rpc(
     method: String,
     params: Option<serde_json::Value>,
     state: tauri::State<'_, Mutex<EngineState>>,
 ) -> Result<serde_json::Value, String> {
-    let id = format!(
-        "r{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos()
-    );
+    let id = format!("r{}", RPC_COUNTER.fetch_add(1, Ordering::Relaxed));
     let request = serde_json::json!({
         "id": id,
         "method": method,
         "params": params.unwrap_or(serde_json::json!({}))
     });
     let (tx, rx) = oneshot::channel::<serde_json::Value>();
-    {
+
+    let (stdin_arc, pending) = {
         let guard = state.lock().unwrap();
-        guard.pending.lock().unwrap().insert(id.clone(), tx);
-        if let Some(stdin_arc) = &guard.stdin {
-            let mut stdin = stdin_arc.lock().unwrap();
-            stdin
-                .write_all(format!("{request}\n").as_bytes())
-                .map_err(|e| {
-                    guard.pending.lock().unwrap().remove(&id);
-                    format!("Write failed: {e}")
-                })?;
-        } else {
-            guard.pending.lock().unwrap().remove(&id);
-            return Err("Engine is not running".into());
+        let stdin = guard.stdin.clone().ok_or("Engine is not running")?;
+        let pending = guard.pending.clone();
+        (stdin, pending)
+        // guard dropped here
+    };
+
+    pending.lock().unwrap().insert(id.clone(), tx);
+
+    {
+        let mut stdin = stdin_arc.lock().unwrap();
+        if let Err(e) = stdin.write_all(format!("{request}\n").as_bytes()) {
+            pending.lock().unwrap().remove(&id);
+            return Err(format!("Write failed: {e}"));
         }
     }
+
     let response = rx.await.map_err(|_| "Engine closed before responding".to_string())?;
     if let Some(err) = response.get("error") {
-        return Err(err.to_string());
+        let message = err.get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or_else(|| err.as_str().unwrap_or("unknown error"));
+        return Err(message.to_string());
     }
     Ok(response.get("result").cloned().unwrap_or(serde_json::Value::Null))
 }
@@ -179,23 +203,6 @@ fn engine_diagnostics(state: tauri::State<'_, Mutex<EngineState>>) -> String {
     state.lock().unwrap().stderr_tail.lock().unwrap().join("\n")
 }
 
-// ─── Onboarding / connections stubs ─────────────────────────────────────────
-
-#[tauri::command]
-fn connections_connect(provider: String) -> Result<(), String> {
-    Err(format!("connections_connect({provider}) not yet implemented"))
-}
-
-#[tauri::command]
-fn onboarding_status() -> serde_json::Value {
-    serde_json::json!({ "complete": false })
-}
-
-#[tauri::command]
-fn onboarding_complete() -> Result<(), String> {
-    Ok(())
-}
-
 // ─── App entry point ─────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -203,11 +210,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Mutex::new(EngineState::new()))
-        .invoke_handler(tauri::generate_handler![engine_send, engine_rpc, engine_running, engine_diagnostics, connections_connect, onboarding_status, onboarding_complete])
+        .invoke_handler(tauri::generate_handler![engine_send, engine_rpc, engine_running, engine_diagnostics])
         .setup(|app| {
-            // Spawn the engine when the Tauri app starts.
-            // We log errors but don't crash — the UI shows "stopped" and can
-            // inform the user to check that the Python package is installed.
             if let Err(e) = spawn_engine(app.handle()) {
                 eprintln!("[gather-desktop] engine spawn failed: {e}");
             }

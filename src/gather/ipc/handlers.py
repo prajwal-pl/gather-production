@@ -425,46 +425,34 @@ class Handlers:
         return payload
 
     def onboarding_status(self, params: dict[str, Any]) -> dict[str, Any]:
-        settings = self.runtime.settings
-        onboarded = settings.onboarded.unwrap_or(False)
+        store = self.secret_store
+        onboarded_raw = store.get("GATHER_ONBOARDED") if store is not None else None
+        onboarded = onboarded_raw is not None and onboarded_raw.strip().lower() in {
+            "1", "true", "yes", "on"
+        }
         conn_rows = self.runtime.store.connections(self.org, status=None)
         connections = len(conn_rows) if conn_rows else 0
-
-        keys = {**self.keys}
-        google_configured = (
-            keys.get("GOOGLE_CLIENT_ID")
-            and not keys.get("GOOGLE_CLIENT_ID", "").strip().is_empty()
-        )
-
-        # Model configured means at least one model in chain has its key present
-        from ..config import PROVIDER_KEY_ENV
         live_models = tuple(
-            spec for spec in settings.chain
-            if os.environ.get(PROVIDER_KEY_ENV[spec.provider])
+            spec for spec in self.runtime.settings.chain
+            if self.keys.get(PROVIDER_KEY_ENV.get(spec.provider, ""))
         )
-        model_configured = len(live_models) > 0
-
         return {
             "ok": True,
-            "needs_onboarding": not onboarded and connections == 0,
             "onboarded": onboarded,
+            "needs_onboarding": not onboarded,
             "connections": connections,
-            "google_configured": google_configured,
-            "model_configured": model_configured,
+            "model_configured": len(live_models) > 0,
         }
 
     def onboarding_complete(self, params: dict[str, Any]) -> dict[str, Any]:
-        # Write the onboarding flag via the secret store
         store = self.secret_store
         if store is not None and store.writable:
             store.set("GATHER_ONBOARDED", "1")
-
-        # Update in-memory settings
-        self.runtime.settings.onboarded = True
-
-        # Emit signal so UI can reset
-        self._emit("onboarding.completed", {})
-
+        # Persist org_name if provided
+        org_name = params.get("org_name")
+        if org_name and store is not None and store.writable:
+            store.set("GATHER_ORG_NAME", str(org_name))
+        self._emit("onboarding.completed", {"at": _timestamp()})
         return {"ok": True, "onboarded": True}
 
     def connections_connect(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -519,15 +507,15 @@ class Handlers:
                 client_id=client_id,
                 client_secret=client_secret,
                 timeout=240,
-                open_browser=False,  # we handle the browser from the Rust side or engine process
+                open_browser=True,
             )
         except Exception as exc:  # noqa: BLE001 - flow cancelled / timed out
             raise RpcError("oauth_failed", f"OAuth flow failed: {exc}") from exc
 
         # Store the refresh token in the secret store so the connector picks it up
         refresh_token = tokens.get("refresh_token") or ""
-        if store is not None and store.writable:
-            store.set("GMAIL_REFRESH_TOKEN", refresh_token)
+        if self.secret_store is not None and self.secret_store.writable:
+            self.secret_store.set("GMAIL_REFRESH_TOKEN", refresh_token)
         self.keys["GMAIL_REFRESH_TOKEN"] = refresh_token
 
         # Upsert the connection as a user-mode Gmail connection with the email as user_id
@@ -538,7 +526,7 @@ class Handlers:
             (u for u in users if u.get("id") == user_email or u.get("email") == user_email),
             None,
         )
-        user_id = user_match["id"] if user_match else self.runtime.store.upsert_user(org, user_email, user_email)
+        user_id = user_match["id"] if user_match else self.runtime.store.add_user(org, user_email, user_email)
 
         connection_id = self.runtime.store.upsert_connection(
             org,

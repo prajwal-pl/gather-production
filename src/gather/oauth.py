@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import re
+import secrets
 import sys
 import threading
 import time
@@ -97,35 +98,34 @@ class _OAuthCallbackHandler(BaseHTTPRequestHandler):
         self.do_GET()
 
 
-def _run_callback_server(
+def _start_callback_server(
     result: dict[str, Any],
-    timeout: float,
     host: str = "127.0.0.1",
-) -> None:
-    """Bind a single-use HTTP server, wait for callback or timeout."""
-    server = HTTPServer((host, 0), _OAuthCallbackHandler)  # port 0 → ephemeral
+    port: int = 0,
+) -> HTTPServer:
+    server = HTTPServer((host, port), _OAuthCallbackHandler)
     server.result = result
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    return server
 
+
+def _wait_for_callback(server: HTTPServer, result: dict[str, Any], timeout: float) -> None:
+    """Block until the callback arrives, times out, or errors."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if result.get("code") is not None or result.get("error") is not None:
             break
-        server.handle_request()  # non-blocking iteration
         time.sleep(0.05)
 
-    # final check after loop
     if not (result.get("code") or result.get("error")):
         result["timed_out"] = True
 
-    # shut down
     try:
         server.shutdown()
     except Exception:
         pass
     server.server_close()
-    thread.join(timeout=2)
 
 
 # ---------------------------------------------------------------------------
@@ -154,20 +154,18 @@ class GoogleOAuth:
         *,
         client_id: str,
         client_secret: str,
-        redirect_uri: str | None = None,
         timeout: int = 240,
     ) -> None:
         self.client_id = client_id
         self.client_secret = client_secret
-        self.redirect_uri = redirect_uri or f"http://127.0.0.1:{os.getenv('GATHER_OAUTH_PORT', '0')}/callback"
         self.timeout = timeout
         self.code_verifier, self.code_challenge = _generate_pkce()
 
-    def authorization_url(self) -> str:
-        """Return the URL to open in the system browser."""
+    def _authorization_url(self, redirect_uri: str) -> str:
+        """Build the Google authorization URL for the given redirect URI."""
         params = {
             "client_id": self.client_id,
-            "redirect_uri": self.redirect_uri,
+            "redirect_uri": redirect_uri,
             "response_type": "code",
             "scope": " ".join(SCOPES),
             "state": secrets.token_urlsafe(24),
@@ -176,17 +174,16 @@ class GoogleOAuth:
             "access_type": "offline",
             "prompt": "consent",
         }
-        qs = urllib.parse.urlencode(params, query_pairs_limit=10)
-        return f"{AUTH_URL}?{qs}"
+        return f"{AUTH_URL}?{urllib.parse.urlencode(params)}"
 
-    def _exchange_code(self, code: str) -> dict[str, Any]:
+    def _exchange_code(self, code: str, redirect_uri: str) -> dict[str, Any]:
         """Exchange authorization code for tokens + user info."""
         payload = {
             "client_id": self.client_id,
             "client_secret": self.client_secret,
             "code": code,
             "grant_type": "authorization_code",
-            "redirect_uri": self.redirect_uri,
+            "redirect_uri": redirect_uri,
             "code_verifier": self.code_verifier,
         }
         r = httpx.post(TOKEN_URL, data=payload, timeout=30)
@@ -239,29 +236,34 @@ class GoogleOAuth:
     def run(self, *, open_browser: bool = True) -> dict[str, Any]:
         """Run the full flow.
 
-        1. Open the authorization URL (or return it if open_browser=False)
-        2. Start a local HTTP server to capture the callback
-        3. Exchange the code for tokens
-        4. Return {access_token, refresh_token, user_email}
+        1. Bind the callback server to get the real ephemeral port
+        2. Build the redirect URI and authorization URL with that port
+        3. Open the browser
+        4. Wait for the callback, exchange the code, return tokens
         """
         result: dict[str, Any] = {}
 
-        if open_browser:
-            url = self.authorization_url()
-            webbrowser.open(url, new=2)  # open in new tab if possible
+        # Bind on a fixed port so the redirect URI is predictable across runs.
+        # Override with GATHER_OAUTH_PORT if needed.
+        port = int(os.getenv("GATHER_OAUTH_PORT", "8488"))
+        server = _start_callback_server(result, port=port)
+        port = server.server_address[1]  # in case of fallback
+        redirect_uri = f"http://127.0.0.1:{port}/callback"
 
-        _run_callback_server(result, self.timeout)
+        if open_browser:
+            url = self._authorization_url(redirect_uri)
+            webbrowser.open(url, new=2)
+
+        _wait_for_callback(server, result, self.timeout)
 
         if result.get("timed_out"):
             raise TimeoutError("OAuth callback timed out (no code received)")
-
         if result.get("error"):
             raise RuntimeError(f"OAuth cancelled or errored: {result['error']}")
-
         if not result.get("code"):
             raise RuntimeError("OAuth callback received with no code")
 
-        tokens = self._exchange_code(result["code"])
+        tokens = self._exchange_code(result["code"], redirect_uri)
         return tokens
 
 # ---------------------------------------------------------------------------

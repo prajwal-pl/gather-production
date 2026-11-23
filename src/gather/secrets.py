@@ -53,6 +53,7 @@ STORED_SETTINGS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "GATHER_POLL_INTERVAL": ("poll_interval_s", float),
     "GATHER_SWEEP_INTERVAL": ("sweep_interval_s", float),
     "GATHER_ONBOARDED": ("onboarded", lambda raw: raw.strip().lower() in {"1", "true", "yes", "on"}),
+    "GATHER_ORG_NAME": ("org_name", str),
 }
 
 
@@ -281,8 +282,12 @@ def apply_stored_settings(settings: Settings, store: SecretStore | None) -> Sett
     """Overlay persisted non-secret settings onto env-derived settings."""
     if store is None:
         return settings
+    from dataclasses import fields as dc_fields
+    valid_fields = {f.name for f in dc_fields(settings)}
     overrides: dict[str, Any] = {}
     for key, (field, cast) in STORED_SETTINGS.items():
+        if field not in valid_fields:
+            continue
         try:
             raw = store.get(key)
         except SecretStoreError:
