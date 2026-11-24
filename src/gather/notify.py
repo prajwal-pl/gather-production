@@ -48,14 +48,15 @@ class Notifier:
 
         if self.webhook_url:
             try:
-                httpx.post(
+                response = httpx.post(
                     self.webhook_url,
                     json={"text": f"*{subject}*\n{body}"},
                     timeout=15,
                 )
+                response.raise_for_status()
                 record["delivered"] = "slack"
-            except Exception as exc:  # noqa: BLE001
-                record["delivered"] = f"slack_failed: {exc}"
+            except httpx.HTTPError:
+                record["delivered"] = "slack_failed"
 
         self.log(f"[notify:{channel}] to={to or '-'} | {subject}")
         return record

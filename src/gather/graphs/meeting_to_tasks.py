@@ -27,7 +27,7 @@ from ..connectors.base import Capability, CapabilityHub
 from ..connectors.fireflies import FirefliesConnector
 from ..db import Store
 from ..domain import Commitment, Meeting, Person, task_fingerprint
-from ..llm import BaseLLM
+from ..llm import BaseLLM, FixtureLLM
 from ..notify import Notifier
 
 
@@ -71,6 +71,7 @@ class MeetingState(TypedDict, total=False):
     created: list[dict]
     candidate: dict
     manual: bool
+    sample: bool
 
 
 def build_meeting_graph(deps: Deps, *, checkpointer: Any):
@@ -148,7 +149,7 @@ def build_meeting_graph(deps: Deps, *, checkpointer: Any):
         )
         settings = deps.settings
         candidates, stats = extract_commitments(
-            deps.llm,
+            FixtureLLM(today=deps.day()) if state.get("sample") else deps.llm,
             meeting,
             max_chars=settings.chunk_chars,
             max_chunks=settings.max_chunks,
@@ -215,7 +216,9 @@ def build_meeting_graph(deps: Deps, *, checkpointer: Any):
         if not state.get("candidates"):
             return END
         return [
-            Send("enrich", {"org_id": state["org_id"], "candidate": candidate})
+            Send("enrich", {
+                "org_id": state["org_id"], "candidate": candidate, "sample": state.get("sample", False)
+            })
             for candidate in state["candidates"]
         ]
 
@@ -223,7 +226,7 @@ def build_meeting_graph(deps: Deps, *, checkpointer: Any):
         candidate = dict(state["candidate"])
         deps.report("enrich", {"candidate": candidate.get("title", "")})
         query = f"{candidate['title']} {candidate.get('owner_email') or ''}".strip()
-        hits = deps.hub.search_messages(state["org_id"], query, limit=3)
+        hits = [] if state.get("sample") else deps.hub.search_messages(state["org_id"], query, limit=3)
         candidate["context"] = [
             {
                 "provider": hit["provider"],
@@ -251,13 +254,14 @@ def build_meeting_graph(deps: Deps, *, checkpointer: Any):
             "task_approval",
             {
                 "meeting": state.get("title"),
+                "meeting_id": state.get("meeting_row_id"),
                 "tasks": cards,
                 "duplicates": state.get("duplicates", []),
                 "warning": state.get("warning", ""),
             },
             thread_id=state.get("thread_id"),
         )
-        if deps.settings.auto_approve:
+        if deps.settings.auto_approve and not state.get("sample"):
             decision = {"approved": [card["fingerprint"] for card in cards], "edits": {}}
             store.decide_proposal(proposal["id"], "approved", "policy")
         else:
@@ -316,6 +320,8 @@ def build_meeting_graph(deps: Deps, *, checkpointer: Any):
         return {"created": created}
 
     def notify(state: MeetingState) -> dict:
+        if state.get("sample"):
+            return {}
         for task in state.get("created", []):
             due = f" (due {task['due_date']})" if task.get("due_date") else ""
             deps.notifier.send(
@@ -365,6 +371,7 @@ def run_meeting(
     thread_id: str | None = None,
     meeting_row_id: str | None = None,
     manual: bool = False,
+    sample: bool = False,
 ) -> tuple[dict, str]:
     thread_id = thread_id or f"meeting-{external_id}-{uuid.uuid4().hex[:6]}"
     config = {"configurable": {"thread_id": thread_id}}
@@ -377,6 +384,8 @@ def run_meeting(
         initial["meeting_row_id"] = meeting_row_id
     if manual:
         initial["manual"] = True
+    if sample:
+        initial["sample"] = True
     state = graph.invoke(initial, config)
     return state, thread_id
 

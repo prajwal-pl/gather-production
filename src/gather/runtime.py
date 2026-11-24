@@ -127,7 +127,7 @@ def build_runtime(
             settings,
             log=log,
             webhook_url=(
-                keys.get("SLACK_WEBHOOK_URL", "") if secrets is not None else None
+                "" if force_fixture else keys.get("SLACK_WEBHOOK_URL", "") if secrets is not None else None
             ),
         )
 

@@ -15,20 +15,25 @@ import {
   EyeOff,
   Save,
 } from "lucide-react";
-import { Badge, Button, Spinner } from "./ui";
+import { Badge, Button, ErrorNotice, Spinner } from "./ui";
 import { engine, flags, type SettingsSnapshot } from "../engine";
 
 const MODEL_KEYS = [
   {
     key: "GROQ_API_KEY",
     label: "Groq API key",
-    hint: "Free at console.groq.com — primary extraction model",
+    hint: "Credentials for the configured Groq models.",
   },
   {
     key: "OPENROUTER_API_KEY",
     label: "OpenRouter API key",
     hint: "Fallback model chain at openrouter.ai",
   },
+];
+
+const GOOGLE_KEYS = [
+  { key: "GOOGLE_CLIENT_ID", label: "Google OAuth client ID", hint: "Use the client ID from a Desktop app OAuth credential." },
+  { key: "GOOGLE_CLIENT_SECRET", label: "Google OAuth client secret", hint: "Use the secret from the same credential." },
 ];
 
 function SecretField({
@@ -158,14 +163,14 @@ export function SettingsView({
 }: {
   theme?: "light" | "dark";
   onToggleTheme?: () => void;
-  onResetOnboarding?: () => void;
+  onResetOnboarding?: () => Promise<void>;
 }) {
   // Profile lives in the file-backed flag store; localStorage is only a cache.
   const [userName, setUserName] = useState(
     () => localStorage.getItem("gather_user_name") || "Operator",
   );
   const [userEmail, setUserEmail] = useState(
-    () => localStorage.getItem("gather_user_email") || "local@gather.vault",
+    () => localStorage.getItem("gather_user_email") || "",
   );
   const [userWorkspace, setUserWorkspace] = useState(
     () => localStorage.getItem("gather_workspace") || "Local Vault",
@@ -173,6 +178,8 @@ export function SettingsView({
   const [snapshot, setSnapshot] = useState<SettingsSnapshot | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [restartRequired, setRestartRequired] = useState(false);
+  const [resetError, setResetError] = useState("");
+  const [resetting, setResetting] = useState(false);
 
   async function loadSettings() {
     try {
@@ -201,9 +208,7 @@ export function SettingsView({
     };
   }, []);
 
-  const modelChain = snapshot?.chain?.length
-    ? snapshot.chain
-    : ["groq:openai/gpt-oss-120b", "openrouter:nvidia/nemotron-3.5-lightning:free"];
+  const modelChain = snapshot?.chain ?? [];
   const backend = snapshot?.secrets_backend === "keyring" ? "OS keychain" : snapshot?.secrets_backend;
   const hasLiveModel = Boolean(
     snapshot?.secrets?.GROQ_API_KEY || snapshot?.secrets?.OPENROUTER_API_KEY,
@@ -212,18 +217,16 @@ export function SettingsView({
   return (
     <div className="flex flex-col h-full bg-[oklch(var(--background))]">
       {/* Toolbar */}
-      <div className="px-6 py-4 border-b border-[oklch(var(--border))] flex items-center justify-between">
+      <header className="page-header">
         <div>
-          <h2 className="text-sm font-semibold text-[oklch(var(--foreground))] tracking-tight">
-            Settings & Vault Preferences
-          </h2>
+          <h1>Settings</h1>
           <p className="text-xs text-[oklch(var(--muted-foreground))] mt-0.5">
-            Credentials and state stored locally in your OS Keychain and SQLite database
+            Manage credentials, extraction models, and appearance
           </p>
         </div>
-      </div>
+      </header>
 
-      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
+      <div className="page-body space-y-6">
         {/* Account & Profile Summary */}
         <section>
           <div className="flex items-center gap-2 mb-2.5">
@@ -242,14 +245,19 @@ export function SettingsView({
                   {userName}
                 </p>
                 <p className="text-[0.6875rem] text-[oklch(var(--muted-foreground))]">
-                  {userEmail} · {userWorkspace}
+                  {userEmail ? `${userEmail} · ` : ""}{userWorkspace}
                 </p>
               </div>
             </div>
             {onResetOnboarding && (
               <Button
                 variant="outline"
-                onClick={onResetOnboarding}
+                disabled={resetting}
+                onClick={() => {
+                  setResetting(true);
+                  setResetError("");
+                  void onResetOnboarding().catch((err) => setResetError(String(err))).finally(() => setResetting(false));
+                }}
                 className="text-xs h-8 gap-1.5"
               >
                 <RotateCcw size={12} />
@@ -257,6 +265,7 @@ export function SettingsView({
               </Button>
             )}
           </div>
+          {resetError && <ErrorNotice>{resetError}</ErrorNotice>}
         </section>
 
         {/* AI credentials */}
@@ -295,6 +304,17 @@ export function SettingsView({
             Keys are write-only and never returned to the UI. Without one, the
             engine runs in offline fixture mode.
           </p>
+        </section>
+
+        <section>
+          <h3 className="text-sm font-semibold mb-2">Google OAuth credentials</h3>
+          <div className="surface px-4">
+            {GOOGLE_KEYS.map((field) => (
+              <SecretField key={field.key} name={field.key} label={field.label} hint={field.hint}
+                present={Boolean(snapshot?.secrets?.[field.key])} backend={backend}
+                onChanged={() => void loadSettings()} onRestartRequired={() => {}} />
+            ))}
+          </div>
         </section>
 
         {/* Appearance & Dark Mode Toggle */}
@@ -357,7 +377,7 @@ export function SettingsView({
           </div>
           <div className="border border-[oklch(var(--border))] bg-[oklch(var(--card))] rounded-xl p-4 space-y-3 shadow-xs">
             <p className="text-xs text-[oklch(var(--muted-foreground))] leading-relaxed">
-              gather executes models in sequence until one satisfies the extraction schema. The default chain uses verified free hosted tiers.
+              Gather tries these models in order. Hosted models receive transcript excerpts when you run extraction.
             </p>
             {!hasLiveModel && snapshot && (
               <div className="p-2.5 rounded-lg bg-[oklch(0.72_0.18_80/0.12)] border border-[oklch(0.72_0.18_80/0.25)] text-[0.6875rem] text-[oklch(0.55_0.18_80)]">
@@ -392,10 +412,10 @@ export function SettingsView({
               </p>
             </div>
             <code className="text-xs text-[oklch(var(--muted-foreground))] font-mono">
-              ~/.local/share/gather/
+              {snapshot?.data_dir || "Loading path…"}
             </code>
             <p className="text-[0.6875rem] text-[oklch(var(--muted-foreground))] mt-2 leading-relaxed">
-              All files are owned by your user account: gather.db · checkpoints.db · logs/engine.log · secrets.json
+              Workspace data is stored in SQLite. Credential storage: {backend || "unknown"}.
             </p>
           </div>
         </section>

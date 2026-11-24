@@ -1,214 +1,105 @@
-/**
- * ConnectionsView — manage provider connections (Fireflies, Gmail).
- */
 import { useEffect, useState } from "react";
-import { RefreshCw, Plug, AlertCircle, CheckCircle2, Clock, ShieldCheck } from "lucide-react";
+import { Mail, Mic, RefreshCw } from "lucide-react";
 import { engine, type Connection } from "../engine";
-import { Badge, Button, EmptyState, Spinner, formatDate } from "./ui";
+import { Badge, Button, ErrorNotice, Spinner, formatDate } from "./ui";
 
-const PROVIDER_LABELS: Record<string, string> = {
-  fireflies: "Fireflies.ai",
-  gmail: "Google Workspace / Gmail",
-};
-
-const PROVIDER_ICONS: Record<string, string> = {
-  fireflies: "🎙️",
-  gmail: "✉️",
-};
-
-function ConnectionCard({
-  conn,
-  onReload,
-}: {
-  conn: Connection;
-  onReload: () => Promise<void>;
-}) {
-  const [reconnecting, setReconnecting] = useState(false);
-  const [reconnectError, setReconnectError] = useState<string | null>(null);
-
-  const statusVariant =
-    conn.status === "active"
-      ? "success"
-      : conn.status === "error"
-      ? "error"
-      : "muted";
-
-  async function handleReconnect() {
-    setReconnecting(true);
-    setReconnectError(null);
-    try {
-      await engine.connections.connect("gmail");
-      await onReload();
-    } catch (err) {
-      setReconnectError(String(err));
-    } finally {
-      setReconnecting(false);
-    }
-  }
-
-  return (
-    <div className="border border-[oklch(var(--border))] bg-[oklch(var(--card))] rounded-xl p-5 shadow-xs transition-all hover:border-[oklch(var(--primary)/0.25)]">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <span className="text-2xl leading-none p-2 rounded-lg bg-[oklch(var(--background))] border border-[oklch(var(--border)/0.5)]">
-            {PROVIDER_ICONS[conn.provider] || "🔌"}
-          </span>
-          <div>
-            <p className="text-xs font-semibold text-[oklch(var(--foreground))]">
-              {PROVIDER_LABELS[conn.provider] || conn.provider}
-            </p>
-            {conn.user_id && (
-              <p className="text-[0.6875rem] text-[oklch(var(--muted-foreground))] mt-0.5">
-                {conn.user_id}
-              </p>
-            )}
-          </div>
-        </div>
-        <Badge variant={statusVariant}>
-          {conn.status === "active" ? (
-            <CheckCircle2 size={10} className="mr-0.5" />
-          ) : conn.status === "error" ? (
-            <AlertCircle size={10} className="mr-0.5" />
-          ) : (
-            <Clock size={10} className="mr-0.5" />
-          )}
-          {conn.status}
-        </Badge>
-      </div>
-
-      {/* Sync times */}
-      <div className="mt-4 pt-3 border-t border-[oklch(var(--border)/0.5)] grid grid-cols-2 gap-3">
-        <div>
-          <p className="text-[0.6875rem] uppercase tracking-wide text-[oklch(var(--muted-foreground))] mb-0.5">
-            Last cursor sync
-          </p>
-          <p className="text-xs text-[oklch(var(--foreground))] font-medium">
-            {formatDate(conn.last_sync_at)}
-          </p>
-        </div>
-        <div>
-          <p className="text-[0.6875rem] uppercase tracking-wide text-[oklch(var(--muted-foreground))] mb-0.5">
-            Next scheduled poll
-          </p>
-          <p className="text-xs text-[oklch(var(--foreground))] font-medium">
-            {formatDate(conn.next_sync_at)}
-          </p>
-        </div>
-      </div>
-
-      {conn.last_error && (
-        <div className="mt-3 p-2.5 bg-[oklch(var(--destructive)/0.08)] border border-[oklch(var(--destructive)/0.2)] rounded-lg text-xs text-[oklch(var(--destructive))]">
-          {conn.last_error}
-        </div>
-      )}
-
-      {reconnectError && (
-        <div className="mt-2 p-2.5 bg-[oklch(var(--destructive)/0.08)] border border-[oklch(var(--destructive)/0.2)] rounded-lg text-xs text-[oklch(var(--destructive))]">
-          {reconnectError}
-        </div>
-      )}
-
-      {conn.provider === "gmail" && (
-        <div className="mt-3 flex justify-end">
-          <Button
-            variant="outline"
-            onClick={handleReconnect}
-            disabled={reconnecting}
-            className="text-xs h-8 gap-1.5"
-          >
-            {reconnecting ? <Spinner size={12} /> : <RefreshCw size={12} />}
-            {reconnecting ? "Waiting for Google…" : "Reconnect Gmail"}
-          </Button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-export function ConnectionsView() {
+export function ConnectionsView({ onOpenSettings }: { onOpenSettings: () => void }) {
   const [connections, setConnections] = useState<Connection[]>([]);
+  const [key, setKey] = useState("");
   const [loading, setLoading] = useState(true);
-  const [syncing, setSyncing] = useState(false);
+  const [busy, setBusy] = useState<string>();
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
   async function load() {
-    setLoading(true);
-    try {
-      const { connections } = await engine.connections.list();
-      setConnections(connections);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function handleSyncNow() {
-    setSyncing(true);
-    try {
-      await engine.scheduler.runNow();
-      await load();
-    } finally {
-      setSyncing(false);
-    }
+    const result = await engine.connections.list();
+    setConnections(result.connections);
   }
 
   useEffect(() => {
-    load();
+    void load().catch((err) => setError(String(err))).finally(() => setLoading(false));
   }, []);
 
+  async function connect(provider: "fireflies" | "gmail") {
+    setBusy(provider);
+    setError("");
+    setNotice("");
+    try {
+      await engine.connections.connect(provider, provider === "fireflies" ? { api_key: key.trim() } : undefined);
+      if (provider === "fireflies") setKey("");
+      await load();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(undefined);
+    }
+  }
+
+  async function sync() {
+    setBusy("sync");
+    setError("");
+    setNotice("");
+    try {
+      const result = await engine.scheduler.runNow();
+      const events = result.events ?? result.poll?.events ?? 0;
+      setNotice(!result.accepted ? "A sync is already in progress." : events ? `${events} new events processed.` : "No new events from sources due for polling.");
+      await load();
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(undefined);
+    }
+  }
+
   return (
-    <div className="flex flex-col h-full bg-[oklch(var(--background))]">
-      {/* Toolbar */}
-      <div className="flex items-center justify-between px-6 py-4 border-b border-[oklch(var(--border))]">
-        <div>
-          <h2 className="text-sm font-semibold text-[oklch(var(--foreground))] tracking-tight">
-            Connected Data Sources
-          </h2>
-          {!loading && (
-            <p className="text-xs text-[oklch(var(--muted-foreground))] mt-0.5">
-              {connections.filter((c) => c.status === "active").length} active provider connectors
-            </p>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={handleSyncNow} disabled={syncing} className="text-xs h-8">
-            {syncing ? <Spinner size={12} /> : <RefreshCw size={12} />}
-            Sync now
-          </Button>
-        </div>
+    <section className="page">
+      <header className="page-header">
+        <div><h1>Connections</h1><p>Import meetings and match email replies to tasks</p></div>
+        <Button variant="outline" onClick={sync} disabled={loading || !!busy || !connections.some((row) => row.status === "active")}>
+          {busy === "sync" ? <Spinner /> : <RefreshCw size={15} />} Sync now
+        </Button>
+      </header>
+      <div className="page-body space-y-4">
+        {error && <ErrorNotice>{error}</ErrorNotice>}
+        {notice && <p className="surface px-4 py-3 text-sm" role="status">{notice}</p>}
+        {loading ? <Spinner /> : (["fireflies", "gmail"] as const).map((provider) => {
+          const rows = connections.filter((connection) => connection.provider === provider);
+          const fireflies = provider === "fireflies";
+          const Icon = fireflies ? Mic : Mail;
+          return (
+            <article className="surface p-5 space-y-4" key={provider}>
+              <div className="flex gap-3 items-start">
+                <Icon size={21} className="mt-1 text-[oklch(var(--accent))]" />
+                <div>
+                  <h2 className="font-semibold">{fireflies ? "Fireflies" : "Gmail"}</h2>
+                  <p className="text-sm text-[oklch(var(--muted-foreground))]">{fireflies ? "Bring in completed meeting transcripts." : "Match changes and replies in your inbox to tracked tasks."}</p>
+                </div>
+              </div>
+              {rows.map((row) => (
+                <div key={row.id} className="border-t pt-3 space-y-2 text-sm">
+                  <Badge variant={row.status === "active" ? "success" : "warn"}>{row.status.replace(/_/g, " ")}</Badge>
+                  <p className="text-[oklch(var(--muted-foreground))]">Last sync {formatDate(row.last_sync_at)} · Next poll {formatDate(row.next_sync_at)}</p>
+                  {row.last_error && <ErrorNotice>{row.last_error}</ErrorNotice>}
+                </div>
+              ))}
+              {fireflies ? (
+                <form onSubmit={(event) => { event.preventDefault(); void connect("fireflies"); }}>
+                  <label htmlFor="fireflies-key" className="text-sm font-medium">Fireflies API key</label>
+                  <div className="flex flex-wrap items-center gap-2 mt-1.5">
+                    <input className="field max-w-xs" id="fireflies-key" type="password" autoComplete="off" value={key} onChange={(event) => setKey(event.target.value)} />
+                    <Button type="submit" variant="outline" disabled={!!busy || !key.trim()}>{busy === provider && <Spinner />}{rows.length ? "Update key" : "Connect Fireflies"}</Button>
+                  </div>
+                </form>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="outline" onClick={() => connect("gmail")} disabled={!!busy}>{busy === provider && <Spinner />}{rows.length ? "Reconnect Gmail" : "Sign in with Google"}</Button>
+                  <Button variant="ghost" onClick={onOpenSettings}>Configure Google credentials</Button>
+                </div>
+              )}
+            </article>
+          );
+        })}
       </div>
-
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-4">
-        {loading ? (
-          <div className="flex justify-center py-20">
-            <Spinner size={24} />
-          </div>
-        ) : connections.length === 0 ? (
-          <EmptyState
-            icon={<Plug size={36} />}
-            title="No connections active"
-            description="Authorize Fireflies or Gmail to start ingesting transcripts and watching email threads."
-          />
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {connections.map((conn) => (
-              <ConnectionCard key={conn.id} conn={conn} onReload={load} />
-            ))}
-          </div>
-        )}
-
-        {/* Polling Info Banner */}
-        <div className="mt-6 p-4 rounded-xl border border-[oklch(var(--border))] bg-[oklch(var(--card))] shadow-xs flex items-start gap-3">
-          <ShieldCheck size={16} className="text-[oklch(var(--accent))] flex-none mt-0.5" />
-          <div>
-            <p className="text-xs font-semibold text-[oklch(var(--foreground))] mb-0.5">
-              Desktop Ingestion Protocol
-            </p>
-            <p className="text-xs text-[oklch(var(--muted-foreground))] leading-relaxed">
-              gather polls Fireflies and Gmail via cursor-based synchronization (historyId). Webhooks and inbound ports are not required, protecting your laptop from public internet exposure.
-            </p>
-          </div>
-        </div>
-      </div>
-    </div>
+    </section>
   );
 }

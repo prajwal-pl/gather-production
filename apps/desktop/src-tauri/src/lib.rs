@@ -14,7 +14,11 @@ static RPC_COUNTER: AtomicU64 = AtomicU64::new(1);
 // ─── Persistent flag store (survives WebView cache clears in dev) ─────────────
 
 fn flags_path(app: &AppHandle) -> PathBuf {
-    app.path().app_data_dir()
+    if let Some(path) = std::env::var_os("GATHER_DATA_DIR").filter(|path| !path.is_empty()) {
+        return PathBuf::from(path).join("desktop-flags.json");
+    }
+    app.path()
+        .app_data_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("flags.json")
 }
@@ -33,8 +37,8 @@ fn write_flags(app: &AppHandle, flags: &serde_json::Value) -> Result<(), String>
         fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
-    let payload = serde_json::to_string_pretty(flags)
-        .map_err(|e| format!("cannot serialize flags: {e}"))?;
+    let payload =
+        serde_json::to_string_pretty(flags).map_err(|e| format!("cannot serialize flags: {e}"))?;
     // Write through a temp file so a crash mid-write cannot corrupt the store.
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, payload).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
@@ -91,12 +95,53 @@ impl EngineState {
 // ─── Spawn the Python engine and bridge stdout → Tauri events ───────────────
 
 fn spawn_engine(app: &AppHandle) -> Result<(), String> {
-    let python = std::env::var("GATHER_PYTHON").unwrap_or_else(|_| {
-        if cfg!(target_os = "windows") { "python".into() } else { "python3".into() }
-    });
+    let state = app.state::<Mutex<EngineState>>();
+    let mut guard = state.lock().unwrap();
+    if let Some(child) = guard.child.as_mut() {
+        if child.try_wait().map_err(|e| e.to_string())?.is_none() {
+            return Ok(());
+        }
+    }
+    guard.child = None;
+    guard.stdin = None;
 
-    // Build args from env vars — nothing is hardcoded so real credentials work.
-    let mut args = vec!["-m".to_string(), "gather.engine".to_string()];
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let venv = repo.join(if cfg!(windows) {
+        ".venv/Scripts/python.exe"
+    } else {
+        ".venv/bin/python"
+    });
+    let sidecar = std::env::current_exe().ok().map(|path| {
+        path.with_file_name(if cfg!(windows) {
+            "gather-engine.exe"
+        } else {
+            "gather-engine"
+        })
+    });
+    let engine = std::env::var_os("GATHER_ENGINE")
+        .map(PathBuf::from)
+        .or_else(|| sidecar.filter(|path| !cfg!(debug_assertions) && path.is_file()));
+    let program = engine.clone().unwrap_or_else(|| {
+        std::env::var_os("GATHER_PYTHON")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                if cfg!(debug_assertions) && venv.is_file() {
+                    venv
+                } else {
+                    PathBuf::from(if cfg!(windows) { "python" } else { "python3" })
+                }
+            })
+    });
+    let mut command = Command::new(&program);
+    if engine.is_none() {
+        command.args(["-m", "gather.engine"]);
+        if cfg!(debug_assertions) {
+            command
+                .current_dir(&repo)
+                .env("PYTHONPATH", repo.join("src"));
+        }
+    }
+    let mut args: Vec<String> = Vec::new();
     if std::env::var("GATHER_FIXTURE").as_deref() == Ok("1") {
         args.push("--fixture".to_string());
     }
@@ -111,15 +156,17 @@ fn spawn_engine(app: &AppHandle) -> Result<(), String> {
     if let Ok(secrets) = std::env::var("GATHER_SECRETS") {
         args.push("--secrets".to_string());
         args.push(secrets);
+    } else if cfg!(debug_assertions) {
+        args.extend(["--secrets".into(), "file".into()]);
     }
 
-    let mut child = Command::new(&python)
+    let mut child = command
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to spawn engine ({python}): {e}"))?;
+        .map_err(|e| format!("Failed to start {}: {e}", program.display()))?;
 
     let stdin = child.stdin.take().ok_or("Failed to get engine stdin")?;
     let stdout = child.stdout.take().ok_or("Failed to get engine stdout")?;
@@ -127,9 +174,9 @@ fn spawn_engine(app: &AppHandle) -> Result<(), String> {
 
     let stdin_arc = Arc::new(Mutex::new(stdin));
 
-    let state = app.state::<Mutex<EngineState>>();
-    let mut guard = state.lock().unwrap();
-    guard.stdin = Some(stdin_arc.clone());
+    guard.pending = Arc::new(Mutex::new(HashMap::new()));
+    guard.stderr_tail = Arc::new(Mutex::new(Vec::new()));
+    guard.stdin = Some(stdin_arc);
     guard.child = Some(child);
     let pending = guard.pending.clone();
     let stderr_tail = guard.stderr_tail.clone();
@@ -141,7 +188,9 @@ fn spawn_engine(app: &AppHandle) -> Result<(), String> {
         for line in reader.lines().flatten() {
             eprintln!("[engine] {line}");
             let mut tail = stderr_tail.lock().unwrap();
-            if tail.len() >= 40 { tail.remove(0); }
+            if tail.len() >= 40 {
+                tail.remove(0);
+            }
             tail.push(line);
         }
     });
@@ -159,9 +208,10 @@ fn spawn_engine(app: &AppHandle) -> Result<(), String> {
                             if let Some(tx) = pending.lock().unwrap().remove(id) {
                                 let _ = tx.send(parsed.clone());
                             }
-                            let _ = app_handle.emit("engine:response", &parsed);
-                        } else if let Some(event_name) = parsed.get("event").and_then(|e| e.as_str()) {
-                            let _ = app_handle.emit(event_name, &parsed);
+                        } else if let Some(event_name) =
+                            parsed.get("event").and_then(|e| e.as_str())
+                        {
+                            let _ = app_handle.emit(&event_name.replace('.', ":"), &parsed);
                         }
                     }
                 }
@@ -169,6 +219,7 @@ fn spawn_engine(app: &AppHandle) -> Result<(), String> {
                 _ => {}
             }
         }
+        pending.lock().unwrap().clear();
         let _ = app_handle.emit("engine:stopped", ());
     });
 
@@ -179,10 +230,7 @@ fn spawn_engine(app: &AppHandle) -> Result<(), String> {
 
 /// Send a raw JSON-lines request to the engine stdin.
 #[tauri::command]
-fn engine_send(
-    payload: String,
-    state: tauri::State<'_, Mutex<EngineState>>,
-) -> Result<(), String> {
+fn engine_send(payload: String, state: tauri::State<'_, Mutex<EngineState>>) -> Result<(), String> {
     let guard = state.lock().unwrap();
     if let Some(stdin_arc) = &guard.stdin {
         let mut stdin = stdin_arc.lock().unwrap();
@@ -233,14 +281,30 @@ async fn engine_rpc(
         }
     }
 
-    let response = rx.await.map_err(|_| "Engine closed before responding".to_string())?;
+    let timeout = if matches!(method.as_str(), "health" | "onboarding.status") {
+        5
+    } else {
+        300
+    };
+    let response = match tokio::time::timeout(std::time::Duration::from_secs(timeout), rx).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(_)) => return Err("Engine closed before responding".into()),
+        Err(_) => {
+            pending.lock().unwrap().remove(&id);
+            return Err("Engine response timed out. Refresh to check the operation result.".into());
+        }
+    };
     if let Some(err) = response.get("error") {
-        let message = err.get("message")
+        let message = err
+            .get("message")
             .and_then(|m| m.as_str())
             .unwrap_or_else(|| err.as_str().unwrap_or("unknown error"));
         return Err(message.to_string());
     }
-    Ok(response.get("result").cloned().unwrap_or(serde_json::Value::Null))
+    Ok(response
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null))
 }
 
 /// Check whether the engine process is alive.
@@ -260,6 +324,11 @@ fn engine_diagnostics(state: tauri::State<'_, Mutex<EngineState>>) -> String {
     state.lock().unwrap().stderr_tail.lock().unwrap().join("\n")
 }
 
+#[tauri::command]
+fn engine_restart(app: AppHandle) -> Result<(), String> {
+    spawn_engine(&app)
+}
+
 // ─── App entry point ─────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -267,10 +336,26 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Mutex::new(EngineState::new()))
-        .invoke_handler(tauri::generate_handler![engine_send, engine_rpc, engine_running, engine_diagnostics, get_flag, set_flag, delete_flag])
+        .invoke_handler(tauri::generate_handler![
+            engine_send,
+            engine_rpc,
+            engine_running,
+            engine_restart,
+            engine_diagnostics,
+            get_flag,
+            set_flag,
+            delete_flag
+        ])
         .setup(|app| {
             if let Err(e) = spawn_engine(app.handle()) {
                 eprintln!("[gather-desktop] engine spawn failed: {e}");
+                app.state::<Mutex<EngineState>>()
+                    .lock()
+                    .unwrap()
+                    .stderr_tail
+                    .lock()
+                    .unwrap()
+                    .push(e);
             }
             Ok(())
         })

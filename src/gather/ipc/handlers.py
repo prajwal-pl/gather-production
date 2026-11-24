@@ -25,6 +25,7 @@ from ..check import USER as PING_USER
 from ..check import Ping
 from ..config import PROVIDER_KEY_ENV
 from ..connectors.base import Connection
+from ..connectors.fireflies import FirefliesConnector
 from ..domain import Meeting, Person, TaskStatus
 from ..events import EventBus
 from ..graphs import resume_meeting, run_meeting
@@ -100,6 +101,7 @@ class Handlers:
         self._shutdown = shutdown or (lambda: None)
         self.log = log or (lambda _message: None)
         self._decision_lock = threading.Lock()
+        self._sync_lock = threading.Lock()
         # In-process override used when the secret backend is read-only.
         self._onboarded_override: bool | None = None
 
@@ -120,6 +122,7 @@ class Handlers:
         router.register("meetings.list", self.meetings_list)
         router.register("meetings.get", self.meetings_get)
         router.register("meetings.ingest", self.meetings_ingest, slow=True)
+        router.register("meetings.sample", self.meetings_sample, slow=True)
         router.register("runs.list", self.runs_list)
         router.register("runs.get", self.runs_get)
         router.register("runs.cancel", self.runs_cancel)
@@ -563,6 +566,8 @@ class Handlers:
         - "gmail": runs the interactive OAuth 2.0 flow (slow, opens browser)
         - "fireflies": validates and stores an API key
         """
+        if self.runtime.fixture:
+            raise RpcError("unavailable", "Live connections are disabled in the sample engine.")
         provider = params.get("provider")
         if not provider:
             raise RpcError("invalid_params", "provider is required")
@@ -704,28 +709,24 @@ class Handlers:
 
     def _connect_fireflies(self, params: dict[str, Any]) -> dict[str, Any]:
         """Validate and store a Fireflies API key, upsert the connection."""
-        api_key = params.get("api_key") or ""
-        if not api_key:
+        api_key = params.get("api_key")
+        if not isinstance(api_key, str) or not api_key.strip():
             raise RpcError("invalid_params", "Fireflies API key is required")
 
+        api_key = api_key.strip()
         org = self.org
-
-        # Upsert a Fireflies connection (org mode)
-        connection_id = self.runtime.store.upsert_connection(
-            org,
-            "fireflies",
-            mode="org",
-            user_id=None,
-            scopes=[],
+        result = FirefliesConnector(api_key=api_key).test(
+            Connection(id="validation", org_id=org, provider="fireflies")
         )
-        # Make sure it's active
-        self.runtime.store.set_connection_status(connection_id, "active")
+        if not result["ok"]:
+            raise RpcError("connection_failed", result.get("error") or "Fireflies connection failed")
 
-        connection = self.runtime.store.get_connection(connection_id)
-
-        # Store the API key in the secret store
         if self.secret_store is not None and self.secret_store.writable:
             self.secret_store.set("FIREFLIES_API_KEY", api_key)
+        connection_id = self.runtime.store.upsert_connection(
+            org, "fireflies", mode="org", user_id=None, scopes=[]
+        )
+        self.runtime.store.set_connection_status(connection_id, "active")
         self.keys["FIREFLIES_API_KEY"] = api_key
         connector = getattr(self.runtime, "fireflies", None)
         if connector is not None:
@@ -749,7 +750,14 @@ class Handlers:
         if self.scheduler is not None:
             result = self.scheduler.run_now(block=False)
             return {"accepted": not result.get("busy", False), **result}
-        outcomes = self.runtime.poll_once()
+        if not self._sync_lock.acquire(blocking=False):
+            return {"accepted": False, "busy": True}
+        try:
+            outcomes = self.runtime.poll_once()
+            if any(outcome.events for outcome in outcomes):
+                self._emit("data.changed", {"scopes": ["proposals", "tasks", "meetings"]})
+        finally:
+            self._sync_lock.release()
         return {
             "accepted": True,
             "events": sum(outcome.events for outcome in outcomes),
@@ -779,17 +787,31 @@ class Handlers:
             "tasks": self.runtime.store.tasks_for_meeting(str(meeting_id)),
         }
 
+    def meetings_sample(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._ingest_meeting({
+            "external_id": f"sample-{uuid.uuid4().hex}",
+            "provider": "local",
+            "title": "Sample · Website launch",
+            "transcript": (
+                "Maya: I'll send the revised launch checklist by Friday.\n"
+                "Theo: I will confirm the support handoff by Monday.\n"
+                "Maya: We already published the staging site."
+            ),
+        }, sample=True)
+
     def meetings_ingest(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._ingest_meeting(params)
+
+    def _ingest_meeting(self, params: dict[str, Any], *, sample: bool = False) -> dict[str, Any]:
         external_id = params.get("external_id") or params.get("meeting_id")
         if not external_id:
             raise RpcError("invalid_params", "external_id is required")
         external_id = str(external_id)
         provider = str(params.get("provider") or "fireflies")
-        if provider not in self.runtime.hub.providers():
-            raise RpcError("invalid_params", f"unknown provider {provider!r}")
-
         transcript = params.get("transcript")
         manual = transcript is not None
+        if provider not in self.runtime.hub.providers() and not (manual and provider == "local"):
+            raise RpcError("invalid_params", f"unknown provider {provider!r}")
         if not manual and provider != "fireflies":
             raise RpcError(
                 "invalid_params",
@@ -798,8 +820,8 @@ class Handlers:
             )
         row_id: str | None = None
         if manual:
-            if not isinstance(transcript, str):
-                raise RpcError("invalid_params", "transcript must be a string")
+            if not isinstance(transcript, str) or not transcript.strip():
+                raise RpcError("invalid_params", "transcript must be a non-empty string")
             started_at = params.get("started_at")
             if isinstance(started_at, str):
                 try:
@@ -823,7 +845,7 @@ class Handlers:
                     provider=provider,
                     external_id=external_id,
                     title=str(params.get("title") or "Pasted meeting"),
-                    started_at=started_at,
+                    started_at=started_at or datetime.now().astimezone(),
                     duration_min=params.get("duration_min"),
                     participants=participants,
                     transcript=transcript,
@@ -846,6 +868,7 @@ class Handlers:
                 thread_id=thread_id,
                 meeting_row_id=row_id,
                 manual=manual,
+                sample=sample,
             )
 
         try:

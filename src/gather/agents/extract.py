@@ -6,6 +6,8 @@ the output is narrow. Everything after this file is deterministic.
 
 from __future__ import annotations
 
+import re
+
 from datetime import date, datetime
 from difflib import SequenceMatcher
 from typing import Any, Callable
@@ -98,9 +100,14 @@ TRANSCRIPT (chunk {index + 1} of {total}):
     reference = meeting.started_at.date() if meeting.started_at else today
     results: list[Commitment] = []
     for item in batch.commitments:
-        if not item.title.strip():
+        words = item.quote.split()
+        if not item.title.strip() or not words:
             continue
-        # The model proposes a date; the transcript decides it.
+        evidence = re.search(r"\s+".join(map(re.escape, words)), chunk)
+        if evidence is None:
+            continue
+        item.quote = evidence.group()
+        # Prefer a date supported by the quote.
         parsed = due_from_text(item.quote, reference) or parse_due_date(item.due_date, reference)
         item.due_date = parsed.isoformat() if parsed else None
         results.append(item)

@@ -34,6 +34,11 @@ export interface Task {
   updated_at?: string;
 }
 
+export interface TaskEdit {
+  title: string;
+  due_date: string | null;
+}
+
 export interface ProposalTask {
   title: string;
   owner_name?: string;
@@ -52,6 +57,8 @@ export interface Proposal {
   created_at?: string;
   payload: {
     meeting?: string;
+    warning?: string;
+    meeting_id?: string;
     tasks?: ProposalTask[];
     // nudge
     subject?: string;
@@ -59,7 +66,8 @@ export interface Proposal {
     to?: string;
     // reply
     task_title?: string;
-    intent?: string;
+    task?: { id: string; title: string };
+    message?: { from?: string; subject?: string; snippet?: string };
     summary?: string;
   };
 }
@@ -217,7 +225,15 @@ export const engine = {
   onboarding_reset: async (): Promise<{ ok: boolean; onboarded: boolean }> =>
     rpc("onboarding.reset"),
 
-  restart: async (): Promise<void> => { /* no-op: engine restarts are handled by the Tauri supervisor */ },
+  restart: (): Promise<void> => invoke("engine_restart"),
+
+  meetings: {
+    sample: () => rpc<IngestResult>("meetings.sample"),
+    ingest: (external_id: string, title: string, transcript: string) =>
+      rpc<IngestResult>("meetings.ingest", { external_id, title, transcript, provider: "local" }),
+    list: () => rpc<{ meetings: Meeting[] }>("meetings.list"),
+    get: (meeting_id: string) => rpc<{ meeting: Meeting; tasks: Task[] }>("meetings.get", { meeting_id }),
+  },
 
   tasks: {
     list: async (status?: string): Promise<{ tasks: Task[] }> =>
@@ -234,8 +250,9 @@ export const engine = {
     approve: async (
       proposal_id: string,
       approved_indices?: number[],
-    ): Promise<{ already: boolean; status: string; created?: unknown[] }> =>
-      rpc("proposals.approve", { proposal_id, approved_indices }),
+      edits?: Record<string, TaskEdit>,
+    ): Promise<{ already: boolean; status: string; created?: unknown[]; delivered?: { delivered?: string } }> =>
+      rpc("proposals.approve", { proposal_id, approved_indices, edits }),
 
     reject: async (proposal_id: string): Promise<{ already: boolean; status: string }> =>
       rpc("proposals.reject", { proposal_id }),
@@ -277,7 +294,20 @@ export const engine = {
   },
 
   scheduler: {
-    runNow: async (): Promise<{ accepted: boolean; events?: number }> =>
+    runNow: async (): Promise<{ accepted: boolean; events?: number; poll?: { events?: number } }> =>
       rpc("sync.now"),
   },
 };
+
+export interface Meeting {
+  id: string;
+  title: string;
+  transcript?: string;
+  provider: string;
+  started_at?: string;
+}
+
+interface IngestResult {
+  proposal_ids: string[];
+  state: { warning?: string; duplicates?: unknown[]; created?: Task[] };
+}

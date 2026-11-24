@@ -144,7 +144,7 @@ export function Divider({ className = "" }: { className?: string }) {
 export function formatDate(iso?: string | null): string {
   if (!iso) return "—";
   try {
-    const d = new Date(iso.includes("T") ? iso : iso + "T00:00:00Z");
+    const d = new Date(iso.includes("T") ? iso : iso + "T00:00:00");
     return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   } catch {
     return iso;
@@ -154,8 +154,9 @@ export function formatDate(iso?: string | null): string {
 export function relativeDate(iso?: string | null): string {
   if (!iso) return "";
   try {
-    const d = new Date(iso.includes("T") ? iso : iso + "T00:00:00Z");
+    const d = new Date(iso.includes("T") ? iso : iso + "T00:00:00");
     const now = new Date();
+    now.setHours(0, 0, 0, 0);
     const diffMs = d.getTime() - now.getTime();
     const diffDays = Math.round(diffMs / 86400000);
     if (diffDays === 0) return "Today";
@@ -170,6 +171,11 @@ export function relativeDate(iso?: string | null): string {
 
 export function isOverdue(due_date?: string | null): boolean {
   if (!due_date) return false;
-  const d = new Date(due_date + "T00:00:00Z");
-  return d < new Date();
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return new Date(due_date + "T00:00:00") < today;
+}
+
+export function ErrorNotice({ children }: { children: React.ReactNode }) {
+  return <p role="alert" className="error-notice">{children}</p>;
 }

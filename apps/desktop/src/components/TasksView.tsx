@@ -5,7 +5,7 @@
 import { useEffect, useState } from "react";
 import { ListChecks, Calendar, User, Quote } from "lucide-react";
 import { engine, type Task, type TaskStatus } from "../engine";
-import { Badge, Button, EmptyState, Spinner, formatDate, relativeDate, isOverdue } from "./ui";
+import { Badge, Button, EmptyState, ErrorNotice, Spinner, formatDate, relativeDate, isOverdue } from "./ui";
 
 const STATUS_LABELS: Record<TaskStatus, string> = {
   open: "Open",
@@ -24,22 +24,25 @@ const STATUS_BADGE: Record<TaskStatus, "default" | "success" | "warn" | "error" 
 };
 
 const FILTERS: Array<{ label: string; value: string }> = [
-  { label: "Active", value: "all" },
+  { label: "All", value: "all" },
   { label: "Open", value: "open" },
   { label: "In progress", value: "in_progress" },
   { label: "Blocked", value: "blocked" },
   { label: "Done", value: "done" },
+  { label: "Dismissed", value: "dismissed" },
 ];
 
 function TaskRow({
   task,
   onStatusChange,
+  updating,
 }: {
   task: Task;
+  updating: boolean;
   onStatusChange: (id: string, status: TaskStatus) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const overdue = task.status === "open" && isOverdue(task.due_date);
+  const overdue = !["done", "dismissed"].includes(task.status) && isOverdue(task.due_date);
 
   return (
     <div
@@ -48,17 +51,14 @@ function TaskRow({
       }`}
     >
       <div
-        className="flex items-start gap-3.5 px-4 py-3 hover:bg-[oklch(var(--muted)/0.35)] cursor-pointer transition-colors"
-        onClick={() => setExpanded((e) => !e)}
+        className="flex items-start gap-3.5 px-4 py-3"
       >
         {/* Status select dropdown */}
         <select
           value={task.status}
-          onClick={(e) => e.stopPropagation()}
-          onChange={(e) => {
-            e.stopPropagation();
-            onStatusChange(task.id, e.target.value as TaskStatus);
-          }}
+          disabled={updating}
+          aria-label={`Status for ${task.title}`}
+          onChange={(event) => onStatusChange(task.id, event.target.value as TaskStatus)}
           className="mt-0.5 text-[0.6875rem] font-medium border border-[oklch(var(--border))] bg-[oklch(var(--card))] text-[oklch(var(--foreground))] px-2 py-0.5 h-6 rounded-md leading-none flex-none appearance-none cursor-pointer hover:border-[oklch(var(--primary)/0.4)] transition-colors focus:outline-none"
         >
           {Object.entries(STATUS_LABELS).map(([value, label]) => (
@@ -100,6 +100,10 @@ function TaskRow({
               </span>
             )}
             <Badge variant={STATUS_BADGE[task.status]}>{STATUS_LABELS[task.status]}</Badge>
+            {(task.detail || task.source_quote) && (
+              <button type="button" className="text-xs underline underline-offset-2" aria-expanded={expanded}
+                onClick={() => setExpanded((value) => !value)}>{expanded ? "Hide source" : "View source"}</button>
+            )}
           </div>
         </div>
       </div>
@@ -131,55 +135,65 @@ export function TasksView() {
   const [filter, setFilter] = useState("all");
   const [loading, setLoading] = useState(true);
 
-  async function load(status = filter) {
+  const [error, setError] = useState("");
+  const [updating, setUpdating] = useState<string>();
+  const [refresh, setRefresh] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
     setLoading(true);
+    setError("");
+    void engine.tasks.list(filter).then((result) => {
+      if (!cancelled) setTasks(result.tasks);
+    }).catch((err) => { if (!cancelled) setError(String(err)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [filter, refresh]);
+
+  async function handleStatusChange(id: string, status: TaskStatus) {
+    setUpdating(id);
+    setError("");
     try {
-      const { tasks } = await engine.tasks.list(status);
-      setTasks(tasks);
+      const { task } = await engine.tasks.update(id, status);
+      setTasks((rows) => filter === "all" || filter === status
+        ? rows.map((row) => row.id === id ? task : row)
+        : rows.filter((row) => row.id !== id));
+    } catch (err) {
+      setError(String(err));
     } finally {
-      setLoading(false);
+      setUpdating(undefined);
     }
   }
 
-  useEffect(() => {
-    load(filter);
-  }, [filter]);
-
-  async function handleStatusChange(id: string, status: TaskStatus) {
-    await engine.tasks.update(id, status);
-    setTasks((ts) => ts.map((t) => (t.id === id ? { ...t, status } : t)));
-  }
-
-  const open = tasks.filter((t) => t.status === "open").length;
   const overdue = tasks.filter(
-    (t) => t.status === "open" && isOverdue(t.due_date)
+    (task) => !["done", "dismissed"].includes(task.status) && isOverdue(task.due_date)
   ).length;
 
   return (
     <div className="flex flex-col h-full bg-[oklch(var(--background))]">
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-6 py-4 border-b border-[oklch(var(--border))]">
+      <header className="page-header">
         <div>
-          <h2 className="text-sm font-semibold text-[oklch(var(--foreground))] tracking-tight">
-            Tracked Tasks
-          </h2>
+          <h1>Tasks</h1>
           {!loading && (
             <p className="text-xs text-[oklch(var(--muted-foreground))] mt-0.5">
-              {open} open{overdue > 0 ? ` · ${overdue} overdue` : ""}
+              {tasks.length} {tasks.length === 1 ? "task" : "tasks"}{overdue > 0 ? ` · ${overdue} overdue` : ""}
             </p>
           )}
         </div>
-        <Button variant="outline" onClick={() => load(filter)} disabled={loading} className="text-xs h-8">
+        <Button variant="outline" onClick={() => setRefresh((value) => value + 1)} disabled={loading || !!updating} className="text-xs h-8">
           {loading ? <Spinner size={12} /> : null}
           Refresh
         </Button>
-      </div>
+      </header>
 
       {/* Filter tabs */}
-      <div className="flex border-b border-[oklch(var(--border))] px-6 gap-1 bg-[oklch(var(--card))]">
+      <div className="flex overflow-x-auto border-b border-[oklch(var(--border))] px-6 gap-1 bg-[oklch(var(--card))]">
         {FILTERS.map((f) => (
           <button
             key={f.value}
+            aria-pressed={filter === f.value}
+            disabled={!!updating}
             onClick={() => setFilter(f.value)}
             className={`px-3 py-2.5 text-xs font-medium border-b-2 transition-all ${
               filter === f.value
@@ -193,12 +207,13 @@ export function TasksView() {
       </div>
 
       {/* Task list container */}
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="page-body space-y-4">
+        {error && <ErrorNotice>{error}</ErrorNotice>}
         {loading ? (
           <div className="flex justify-center py-20">
             <Spinner size={24} />
           </div>
-        ) : tasks.length === 0 ? (
+        ) : error && tasks.length === 0 ? null : tasks.length === 0 ? (
           <EmptyState
             icon={<ListChecks size={36} />}
             title="No tasks match filter"
@@ -207,7 +222,7 @@ export function TasksView() {
         ) : (
           <div className="border border-[oklch(var(--border))] bg-[oklch(var(--card))] rounded-xl shadow-xs overflow-hidden divide-y divide-[oklch(var(--border)/0.5)]">
             {tasks.map((task) => (
-              <TaskRow key={task.id} task={task} onStatusChange={handleStatusChange} />
+              <TaskRow key={task.id} task={task} updating={!!updating} onStatusChange={handleStatusChange} />
             ))}
           </div>
         )}
