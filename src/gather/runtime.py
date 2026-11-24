@@ -39,6 +39,7 @@ class Runtime:
     runs: RunRegistry
     keys: Mapping[str, str]
     fixture: bool = False
+    log: Callable[[str], None] | None = None
 
     def close(self) -> None:
         self.store.close()
@@ -57,7 +58,7 @@ class Runtime:
             self.runs.checkpoint("event", {"provider": event.provider, "event_id": event.id})
             process_event(self, event)
 
-        poller = PollSource(self.store, self.hub, on_event=handle)
+        poller = PollSource(self.store, self.hub, on_event=handle, log=self.log)
         return poller.run_once(self.org_id, now=now)
 
     def __enter__(self) -> "Runtime":
@@ -178,4 +179,5 @@ def build_runtime(
         runs=runs,
         keys=keys,
         fixture=force_fixture,
+        log=log,
     )

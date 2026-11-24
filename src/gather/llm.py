@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import date
@@ -107,6 +108,9 @@ def _content_text(content: Any) -> str:
 class BaseLLM:
     usage: Usage
 
+    def start_run(self) -> None:
+        """Reset any per-run budget before a graph/agent run. No-op by default."""
+
     def complete(self, system: str, user: str, *, hint: str | None = None) -> str:  # pragma: no cover
         raise NotImplementedError
 
@@ -168,6 +172,13 @@ class ProviderLLM(BaseLLM):
         self.usage = Usage()
         self._cache: dict[str, Any] = {}
         self._last_call = 0.0
+        # Per-thread, per-run budget: a sync tick and a chat can overlap on the
+        # slow worker pool without resetting each other's counts.
+        self._local = threading.local()
+
+    def start_run(self) -> None:
+        """``max_calls`` is a per-run budget, not a lifetime one."""
+        self._local.calls = 0
 
     def _key(self, provider: str) -> str:
         env_name = PROVIDER_KEY_ENV[provider]
@@ -219,7 +230,8 @@ class ProviderLLM(BaseLLM):
         self._last_call = time.monotonic()
 
     def complete(self, system: str, user: str, *, hint: str | None = None) -> str:
-        if self.usage.calls >= self.max_calls:
+        calls_this_run = getattr(self._local, "calls", 0)
+        if calls_this_run >= self.max_calls:
             raise BudgetExceeded(
                 f"call budget reached ({self.max_calls}); degrading this run"
             )
@@ -233,6 +245,7 @@ class ProviderLLM(BaseLLM):
                 if not text:
                     raise LLMError("empty response")
                 self.usage.calls += 1
+                self._local.calls = calls_this_run + 1
                 self.usage.prompt_chars += len(system) + len(user)
                 self.usage.completion_chars += len(text)
                 self._pace()

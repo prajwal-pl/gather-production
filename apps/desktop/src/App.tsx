@@ -9,6 +9,7 @@ import React, { useEffect, useState } from "react";
 import {
   Inbox,
   ListChecks,
+  Bot,
   Plug,
   Settings,
   Circle,
@@ -19,6 +20,7 @@ import "./App.css";
 import { engine, flags, withTimeout, type EngineStatus } from "./engine";
 import { InboxView } from "./components/InboxView";
 import { TasksView } from "./components/TasksView";
+import { AgentView } from "./components/AgentView";
 import { ConnectionsView } from "./components/ConnectionsView";
 import { SettingsView } from "./components/SettingsView";
 import { OnboardingView } from "./components/OnboardingView";
@@ -29,6 +31,7 @@ import { Spinner } from "./components/ui";
 type View =
   | "inbox"
   | "tasks"
+  | "agent"
   | "connections"
   | "settings"
   | "onboarding";
@@ -42,6 +45,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { id: "inbox", label: "Inbox", icon: <Inbox size={15} /> },
   { id: "tasks", label: "Tasks", icon: <ListChecks size={15} /> },
+  { id: "agent", label: "Agent", icon: <Bot size={15} /> },
   { id: "connections", label: "Connections", icon: <Plug size={15} /> },
   { id: "settings", label: "Settings", icon: <Settings size={15} /> },
 ];
@@ -418,6 +422,7 @@ export default function App() {
   const content: Record<View, React.ReactNode> = {
     inbox: <InboxView />,
     tasks: <TasksView />,
+    agent: <AgentView />,
     connections: <ConnectionsView />,
     settings: (
       <SettingsView

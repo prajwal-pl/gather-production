@@ -379,6 +379,19 @@ class Store:
             row["scopes"] = json.loads(row.get("scopes") or "[]")
         return rows
 
+    def update_connection_identity(
+        self,
+        connection_id: str,
+        *,
+        user_id: str | None,
+        scopes: Iterable[str],
+    ) -> None:
+        """Refresh the account/grant metadata after a reconnect."""
+        self._write(
+            "UPDATE connections SET user_id = ?, scopes = ? WHERE id = ?",
+            (user_id, _j(list(scopes)), connection_id),
+        )
+
     def mark_sync_success(
         self,
         connection_id: str,
@@ -392,6 +405,20 @@ class Store:
             "next_sync_at = ?, backoff_until = NULL, error_count = 0, last_error = NULL "
             "WHERE id = ?",
             (cursor, synced_at, next_sync_at, connection_id),
+        )
+
+    def clear_connection_error(
+        self, connection_id: str, *, next_sync_at: str, status: str = "active"
+    ) -> None:
+        """Forget a stale failure after a credential was repaired.
+
+        Reconnecting Gmail (or rotating a Fireflies key) should not leave the
+        old error and exponential backoff on screen until the next poll.
+        """
+        self._write(
+            "UPDATE connections SET last_error = NULL, error_count = 0, "
+            "backoff_until = NULL, next_sync_at = ?, status = ? WHERE id = ?",
+            (next_sync_at, status, connection_id),
         )
 
     def mark_sync_failure(

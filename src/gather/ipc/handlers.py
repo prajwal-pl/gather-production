@@ -19,6 +19,7 @@ from typing import Any, Callable
 from pydantic import BaseModel
 
 from .. import __version__
+from ..agents.assistant import Assistant
 from ..check import SYSTEM as PING_SYSTEM
 from ..check import USER as PING_USER
 from ..check import Ping
@@ -141,6 +142,10 @@ class Handlers:
         router.register("onboarding.complete", self.onboarding_complete)
         router.register("onboarding.reset", self.onboarding_reset)
 
+        # ─── assistant (tool loop: several model calls) ───────────────── #
+        router.register("agent.chat", self.agent_chat, slow=True)
+        router.register("agent.tools", self.agent_tools)
+
         # ─── connections.connect (slow: OAuth flow, API key exchange) ─── #
         router.register("connections.connect", self.connections_connect, slow=True)
 
@@ -182,6 +187,23 @@ class Handlers:
         if not row or row["org_id"] != self.org:
             raise RpcError("not_found", "connection not found")
         return row
+
+    def _refresh_connector_credentials(self) -> None:
+        """Apply secret changes to already-constructed connectors.
+
+        Connectors are built once at engine start. Without this, saving a new
+        key/token only takes effect after a restart.
+        """
+        gmail = getattr(self.runtime, "gmail", None)
+        if gmail is not None and hasattr(gmail, "update_credentials"):
+            gmail.update_credentials(
+                client_id=self.keys.get("GOOGLE_CLIENT_ID") or None,
+                client_secret=self.keys.get("GOOGLE_CLIENT_SECRET") or None,
+                refresh_token=self.keys.get("GMAIL_REFRESH_TOKEN") or None,
+            )
+        fireflies = getattr(self.runtime, "fireflies", None)
+        if fireflies is not None:
+            fireflies.api_key = self.keys.get("FIREFLIES_API_KEY", "")
 
     def _announce_thread(self, thread_id: str) -> list[str]:
         ids: list[str] = []
@@ -328,6 +350,8 @@ class Handlers:
             else:
                 store.set(key, value)
             changed_settings.append(key)
+
+        self._refresh_connector_credentials()
 
         self._emit(
             "settings.changed",
@@ -496,6 +520,42 @@ class Handlers:
         self._emit("onboarding.reset", {"at": _timestamp()})
         return {"ok": True, "onboarded": False, "persisted": writable}
 
+    # -- assistant --------------------------------------------------------- #
+
+    def _assistant(self) -> Assistant:
+        return Assistant(self.runtime, scheduler=self.scheduler, log=self.log)
+
+    def agent_tools(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Introspection for the UI and tests; the model receives the same list."""
+        return {"tools": self._assistant().tool_catalog()}
+
+    def agent_chat(self, params: dict[str, Any]) -> dict[str, Any]:
+        message = params.get("message")
+        if not isinstance(message, str) or not message.strip():
+            raise RpcError("invalid_params", "message is required")
+
+        history = params.get("history") or []
+        if not isinstance(history, list):
+            raise RpcError("invalid_params", "history must be a list of messages")
+
+        assistant = self._assistant()
+        try:
+            result = assistant.chat(message, history=history)
+        except Exception as exc:  # noqa: BLE001 - surface, do not kill the worker
+            self.log(f"[assistant] chat failed: {type(exc).__name__}: {exc}")
+            raise RpcError("agent_failed", f"assistant failed: {exc}") from exc
+
+        self._emit(
+            "agent.replied",
+            {
+                "tool_calls": len(result.get("tool_calls") or []),
+                "fixture": bool(result.get("fixture")),
+                "degraded": bool(result.get("degraded")),
+                "at": _timestamp(),
+            },
+        )
+        return result
+
     def connections_connect(self, params: dict[str, Any]) -> dict[str, Any]:
         """Connect a provider.
 
@@ -553,35 +613,79 @@ class Handlers:
         except Exception as exc:  # noqa: BLE001 - flow cancelled / timed out
             raise RpcError("oauth_failed", f"OAuth flow failed: {exc}") from exc
 
-        # Store the refresh token in the secret store so the connector picks it up
+        # Store the refresh token in the secret store so the connector picks it up.
+        # Google occasionally omits it on re-consent; keep the working one then.
         refresh_token = tokens.get("refresh_token") or ""
+        if not refresh_token:
+            try:
+                stored = (
+                    self.secret_store.get("GMAIL_REFRESH_TOKEN")
+                    if self.secret_store is not None
+                    else None
+                )
+            except SecretStoreError:
+                stored = None
+            refresh_token = stored or self.keys.get("GMAIL_REFRESH_TOKEN") or ""
         if self.secret_store is not None and self.secret_store.writable:
             self.secret_store.set("GMAIL_REFRESH_TOKEN", refresh_token)
         self.keys["GMAIL_REFRESH_TOKEN"] = refresh_token
 
+        # A running engine built its connector at startup. Apply the new grant
+        # immediately so the next sync does not keep using a revoked token.
+        connector = getattr(self.runtime, "gmail", None)
+        if connector is not None and hasattr(connector, "update_credentials"):
+            connector.update_credentials(
+                client_id=client_id,
+                client_secret=client_secret,
+                refresh_token=refresh_token,
+            )
+
         # Upsert the connection as a user-mode Gmail connection with the email as user_id
-        user_email = tokens.get("user_email") or "gmail-user"
-        # Ensure the user exists in the store
+        user_email = tokens.get("user_email") or ""
+        # Ensure the user exists in the store. Older builds used the Google
+        # `sub` claim as the identity; prefer a real email address when present.
         users = self.runtime.store.users(org)
         user_match = next(
-            (u for u in users if u.get("id") == user_email or u.get("email") == user_email),
+            (u for u in users if user_email and (u.get("id") == user_email or u.get("email") == user_email)),
             None,
         )
-        user_id = user_match["id"] if user_match else self.runtime.store.add_user(org, user_email, user_email)
+        user_id = (
+            user_match["id"]
+            if user_match
+            else self.runtime.store.add_user(org, user_email or "gmail-user", user_email or "gmail-user")
+        )
 
-        connection_id = self.runtime.store.upsert_connection(
-            org,
-            "gmail",
-            mode="user",
-            user_id=str(user_id),
-            scopes=[
+        scopes = [scope for scope in str(tokens.get("scope") or "").split() if scope]
+        if not scopes:
+            scopes = [
                 "https://www.googleapis.com/auth/gmail.readonly",
                 "https://www.googleapis.com/auth/gmail.send",
                 "https://www.googleapis.com/auth/gmail.modify",
-            ],
-        )
-        # Make sure it's active
-        self.runtime.store.set_connection_status(connection_id, "active")
+            ]
+
+        # Reuse the existing Gmail row even if the account identity changed
+        # (e.g. `sub` -> email), so a reconnect cannot create a duplicate
+        # connection that ingests the same mailbox twice.
+        existing = self.runtime.store.connections(org, provider="gmail", status=None)
+        if existing:
+            connection_id = existing[0]["id"]
+            self.runtime.store.update_connection_identity(
+                connection_id, user_id=str(user_id), scopes=scopes
+            )
+            self.runtime.store.set_connection_status(connection_id, "active")
+        else:
+            connection_id = self.runtime.store.upsert_connection(
+                org,
+                "gmail",
+                mode="user",
+                user_id=str(user_id),
+                scopes=scopes,
+            )
+            self.runtime.store.set_connection_status(connection_id, "active")
+
+        # The old 403/backoff belonged to the previous grant; a reconnect is a
+        # clean slate, and the next poll should run immediately.
+        self.runtime.store.clear_connection_error(connection_id, next_sync_at=_timestamp())
 
         connection = self.runtime.store.get_connection(connection_id)
 
@@ -594,7 +698,7 @@ class Handlers:
             "provider": "gmail",
             "mode": "user",
             "user_email": user_email,
-            "refresh_token": refresh_token,
+            "connection": connection,
             "ok": True,
         }
 
@@ -623,6 +727,12 @@ class Handlers:
         if self.secret_store is not None and self.secret_store.writable:
             self.secret_store.set("FIREFLIES_API_KEY", api_key)
         self.keys["FIREFLIES_API_KEY"] = api_key
+        connector = getattr(self.runtime, "fireflies", None)
+        if connector is not None:
+            connector.api_key = api_key
+
+        # A new key invalidates the old failure/backoff state.
+        self.runtime.store.clear_connection_error(connection_id, next_sync_at=_timestamp())
 
         self._emit(
             "connections.changed",
@@ -632,7 +742,6 @@ class Handlers:
         return {
             "provider": "fireflies",
             "mode": "org",
-            "api_key": api_key,
             "ok": True,
         }
 
@@ -729,6 +838,7 @@ class Handlers:
         )
 
         def work() -> tuple[dict, str]:
+            self.runtime.llm.start_run()
             return run_meeting(
                 self.runtime.meeting_graph,
                 org_id=self.org,
@@ -893,6 +1003,7 @@ class Handlers:
                     "proposal": proposal,
                 }
 
+            self.runtime.llm.start_run()
             kind = proposal["kind"]
             result: dict[str, Any] = {}
             if kind == "task_approval":

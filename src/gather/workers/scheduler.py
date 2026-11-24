@@ -34,6 +34,7 @@ def sweep(
 ) -> SweepResult:
     today = today or date.today()
     result = SweepResult()
+    llm.start_run()
 
     for task in store.stale_nudge_candidates(org_id, today):
         why = (

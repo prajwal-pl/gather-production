@@ -118,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  first delivery recorded: {first_delivery}")
     print(f"  provider retry suppressed: {not retry_delivery}")
 
+    rt.llm.start_run()
     state, thread_id = run_meeting(
         rt.meeting_graph, org_id=org, external_id=event.subject.id
     )

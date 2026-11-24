@@ -176,7 +176,16 @@ uv run gather-engine --data-dir ~/.local/share/gather --secrets auto
 Methods: `health`, `engine.shutdown`, `settings.get/update`,
 `connections.list/add/remove/test`, `sync.now`, `meetings.list/get/ingest`,
 `runs.list/get/cancel`, `tasks.list/get/update`,
-`proposals.list/get/approve/reject`, `models.check/usage`, `scheduler.status`.
+`proposals.list/get/approve/reject`, `models.check/usage`, `scheduler.status`,
+`onboarding.status/complete/reset`, `agent.chat/tools`.
+
+The `agent.*` methods back the desktop **Agent** panel. The assistant is
+read-only: it plans one tool call at a time against the local store (tasks,
+meetings, proposals, connections, people, runs), optionally searches live Gmail
+or tests a connection, and answers only from those observations. Mutations stay
+in the existing Inbox / Tasks / Connections / Settings approval surfaces. When
+no provider key is configured, a deterministic local planner keeps the panel
+usable; provider failures degrade to the same path.
 
 ### How the Tauri shell launches it (`apps/desktop`)
 

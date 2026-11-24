@@ -190,6 +190,47 @@ def test_engine_lock_is_exclusive(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
+def test_settings_update_refreshes_live_connector_credentials(handlers, runtime):
+    assert runtime.gmail.refresh_token is None
+    call(
+        handlers,
+        "settings.update",
+        {
+            "secrets": {
+                "GOOGLE_CLIENT_ID": "client-id",
+                "GOOGLE_CLIENT_SECRET": "client-secret",
+                "GMAIL_REFRESH_TOKEN": "refresh-token",
+            }
+        },
+    )
+    assert runtime.gmail.client_id == "client-id"
+    assert runtime.gmail.client_secret == "client-secret"
+    assert runtime.gmail.refresh_token == "refresh-token"
+
+
+def test_reconnect_can_clear_a_stale_sync_error(runtime):
+    connection_id = runtime.store.upsert_connection(
+        runtime.org_id, "gmail", mode="user", user_id="u1", scopes=[]
+    )
+    runtime.store.mark_sync_failure(
+        connection_id,
+        error="Client error '403 Forbidden'",
+        next_sync_at="2026-11-23T16:00:25+00:00",
+        backoff_until="2026-11-23T16:00:25+00:00",
+    )
+    assert runtime.store.get_connection(connection_id)["last_error"]
+
+    runtime.store.clear_connection_error(
+        connection_id, next_sync_at="2026-11-24T20:00:00+00:00"
+    )
+    row = runtime.store.get_connection(connection_id)
+    assert row["last_error"] is None
+    assert row["error_count"] == 0
+    assert row["backoff_until"] is None
+    assert row["status"] == "active"
+    assert row["next_sync_at"] == "2026-11-24T20:00:00+00:00"
+
+
 def test_onboarding_complete_persists_and_reset_clears(handlers, tmp_path, runtime):
     status = call(handlers, "onboarding.status")
     assert status["onboarded"] is False
@@ -664,6 +705,15 @@ def test_engine_subprocess_speaks_json_lines_end_to_end(engine):
 
     tasks = engine.request("tasks.list")["result"]["tasks"]
     assert len(tasks) == len(created)
+
+    # The assistant exposes read-only tools and answers from local data.
+    tools = engine.request("agent.tools")
+    assert tools["ok"] is True
+    assert any(tool["name"] == "workspace_overview" for tool in tools["result"]["tools"])
+    chat = engine.request("agent.chat", {"message": "what tasks are open?"})
+    assert chat["ok"] is True
+    assert chat["result"]["tool_calls"]
+    assert "open" in chat["result"]["answer"].lower()
 
     # Unknown methods and malformed input get tidy errors, not a dead engine.
     unknown = engine.request("no.such.method")

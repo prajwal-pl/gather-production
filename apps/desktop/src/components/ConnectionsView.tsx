@@ -16,13 +16,35 @@ const PROVIDER_ICONS: Record<string, string> = {
   gmail: "✉️",
 };
 
-function ConnectionCard({ conn }: { conn: Connection }) {
+function ConnectionCard({
+  conn,
+  onReload,
+}: {
+  conn: Connection;
+  onReload: () => Promise<void>;
+}) {
+  const [reconnecting, setReconnecting] = useState(false);
+  const [reconnectError, setReconnectError] = useState<string | null>(null);
+
   const statusVariant =
     conn.status === "active"
       ? "success"
       : conn.status === "error"
       ? "error"
       : "muted";
+
+  async function handleReconnect() {
+    setReconnecting(true);
+    setReconnectError(null);
+    try {
+      await engine.connections.connect("gmail");
+      await onReload();
+    } catch (err) {
+      setReconnectError(String(err));
+    } finally {
+      setReconnecting(false);
+    }
+  }
 
   return (
     <div className="border border-[oklch(var(--border))] bg-[oklch(var(--card))] rounded-xl p-5 shadow-xs transition-all hover:border-[oklch(var(--primary)/0.25)]">
@@ -77,6 +99,26 @@ function ConnectionCard({ conn }: { conn: Connection }) {
       {conn.last_error && (
         <div className="mt-3 p-2.5 bg-[oklch(var(--destructive)/0.08)] border border-[oklch(var(--destructive)/0.2)] rounded-lg text-xs text-[oklch(var(--destructive))]">
           {conn.last_error}
+        </div>
+      )}
+
+      {reconnectError && (
+        <div className="mt-2 p-2.5 bg-[oklch(var(--destructive)/0.08)] border border-[oklch(var(--destructive)/0.2)] rounded-lg text-xs text-[oklch(var(--destructive))]">
+          {reconnectError}
+        </div>
+      )}
+
+      {conn.provider === "gmail" && (
+        <div className="mt-3 flex justify-end">
+          <Button
+            variant="outline"
+            onClick={handleReconnect}
+            disabled={reconnecting}
+            className="text-xs h-8 gap-1.5"
+          >
+            {reconnecting ? <Spinner size={12} /> : <RefreshCw size={12} />}
+            {reconnecting ? "Waiting for Google…" : "Reconnect Gmail"}
+          </Button>
         </div>
       )}
     </div>
@@ -149,7 +191,7 @@ export function ConnectionsView() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {connections.map((conn) => (
-              <ConnectionCard key={conn.id} conn={conn} />
+              <ConnectionCard key={conn.id} conn={conn} onReload={load} />
             ))}
           </div>
         )}

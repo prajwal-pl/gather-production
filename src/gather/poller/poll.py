@@ -56,6 +56,7 @@ class PollSource:
         jitter: Callable[[], float] | None = None,
         backfill_days: int = BACKFILL_DAYS,
         limit: int = 50,
+        log: Callable[[str], None] | None = None,
     ) -> None:
         self.store = store
         self.hub = hub
@@ -64,6 +65,7 @@ class PollSource:
         self.jitter = jitter or (lambda: random.uniform(0.85, 1.15))
         self.backfill_days = backfill_days
         self.limit = limit
+        self.log = log or (lambda _message: None)
 
     def run_once(
         self, org_id: str, *, now: datetime | None = None
@@ -169,6 +171,7 @@ class PollSource:
         delay = max(base, float(retry_after or 0))
         next_at = now + timedelta(seconds=delay)
         message = str(exc) or exc.__class__.__name__
+        self.log(f"[poller] {conn.provider} sync failed: {message}")
         self.store.mark_sync_failure(
             conn.id,
             error=message,

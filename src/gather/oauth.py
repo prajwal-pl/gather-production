@@ -142,7 +142,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/gmail.modify",
     "openid",
-    "profile",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
 ]
 
 
@@ -206,12 +207,12 @@ class GoogleOAuth:
                     import base64 as _b64
                     payload_data = _b64.urlsafe_b64decode(payload_b64)
                     payload = json.loads(payload_data)
-                    email = payload.get("email") or payload.get("sub")
+                    email = payload.get("email")
             except Exception:
                 pass
 
         if not email:
-            # Fallback: use Gmail profile endpoint (access token already available)
+            # Fallback: use OIDC userinfo (needs the email scope)
             access = tokens.get("access_token")
             if access:
                 try:
@@ -222,7 +223,7 @@ class GoogleOAuth:
                     )
                     info.raise_for_status()
                     data = info.json()
-                    email = data.get("email") or data.get("id")
+                    email = data.get("email")
                 except Exception:
                     pass
 
@@ -230,6 +231,7 @@ class GoogleOAuth:
             "access_token": tokens.get("access_token"),
             "refresh_token": tokens.get("refresh_token"),
             "expires_in": tokens.get("expires_in"),
+            "scope": tokens.get("scope", ""),
             "user_email": email or "",
         }
 

@@ -232,6 +232,82 @@ def test_gmail_429_surfaces_retry_after(monkeypatch):
     assert caught.value.retry_after_s == 9
 
 
+def _gmail_403(reason: str, status: str, message: str) -> dict:
+    return {
+        "error": {
+            "code": 403,
+            "message": message,
+            "errors": [{"message": message, "domain": "global", "reason": reason}],
+            "status": status,
+        }
+    }
+
+
+def test_gmail_403_rate_limit_is_retryable_not_a_reauth(monkeypatch):
+    body = _gmail_403(
+        "userRateLimitExceeded",
+        "RESOURCE_EXHAUSTED",
+        "User-rate limit exceeded. Retry after 2026-11-24T20:05:00Z",
+    )
+    fake_get, _ = _gmail_get({"/history": FakeResponse(body, status_code=403)})
+    monkeypatch.setattr(gmail_module, "httpx", SimpleNamespace(get=fake_get))
+
+    with pytest.raises(RateLimited) as caught:
+        GmailConnector(access_token="tok").sync(
+            Connection(id="c1", org_id="o1", provider="gmail", cursor="100")
+        )
+    assert "rate limit" in str(caught.value).lower()
+
+
+def test_gmail_403_missing_scope_asks_the_user_to_reconnect(monkeypatch):
+    body = _gmail_403(
+        "insufficientPermissions",
+        "PERMISSION_DENIED",
+        "Request had insufficient authentication scopes.",
+    )
+    fake_get, _ = _gmail_get({"/history": FakeResponse(body, status_code=403)})
+    monkeypatch.setattr(gmail_module, "httpx", SimpleNamespace(get=fake_get))
+
+    with pytest.raises(AuthExpired) as caught:
+        GmailConnector(access_token="tok").sync(
+            Connection(id="c1", org_id="o1", provider="gmail", cursor="100")
+        )
+    assert "Reconnect Gmail" in str(caught.value)
+
+
+def test_gmail_403_disabled_api_is_an_actionable_sync_error(monkeypatch):
+    body = _gmail_403(
+        "accessNotConfigured",
+        "PERMISSION_DENIED",
+        "Gmail API has not been used in project 123 before or it is disabled.",
+    )
+    fake_get, _ = _gmail_get({"/history": FakeResponse(body, status_code=403)})
+    monkeypatch.setattr(gmail_module, "httpx", SimpleNamespace(get=fake_get))
+
+    with pytest.raises(SyncError) as caught:
+        GmailConnector(access_token="tok").sync(
+            Connection(id="c1", org_id="o1", provider="gmail", cursor="100")
+        )
+    assert "Enable it" in str(caught.value)
+
+
+def test_gmail_update_credentials_drops_a_cached_access_token():
+    connector = GmailConnector(
+        access_token="old", client_id="cid", client_secret="secret", refresh_token="old-refresh"
+    )
+    connector._token_expires_at = 9_999_999_999
+    connector.update_credentials(
+        client_id="cid2", client_secret="secret2", refresh_token="new-refresh"
+    )
+    assert connector.access_token is None
+    assert connector._token_expires_at == 0
+    assert (connector.client_id, connector.client_secret, connector.refresh_token) == (
+        "cid2",
+        "secret2",
+        "new-refresh",
+    )
+
+
 def test_gmail_backfill_profiles_first_then_lists_recent_mail(monkeypatch):
     order: list[str] = []
 

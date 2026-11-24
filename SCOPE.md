@@ -185,6 +185,7 @@ Method surface (thin adapter over `Runtime`; no new domain logic):
 | approvals | `proposals.list`, `proposals.get`, `proposals.approve`, `proposals.reject` |
 | models | `models.check`, `models.usage` |
 | scheduler | `scheduler.status` |
+| assistant | `agent.chat`, `agent.tools` |
 
 Error codes: `bad_request`, `method_not_found`, `invalid_params`, `not_found`,
 `conflict`, `cancelled`, `unauthorized`, `busy`, `internal_error`.
@@ -594,6 +595,7 @@ downstream step. The existing `cost control` in `llm.py` is the template.
 | Onboarding | connect + configure | provider status, scope explanation, model choice, "try with sample data" |
 | **Approval inbox** | the centerpiece | meeting, task, owner, due, **verbatim quote + speaker + timestamp**, related email, approve/edit/reject, bulk approve |
 | Tasks | the tracker | group by owner / status / due; event timeline; mark done; snooze |
+| Agent | ask + fetch + setup | read-only tool use, which tool ran, offline/degraded state, next step |
 | Meeting detail | trust and audit | transcript, extracted tasks, quotes, re-run extraction |
 | Connections | health | last sync, next sync, error, reauth, pause |
 | Settings | control | models/keys, cadence, privacy, export, delete, diagnostics |

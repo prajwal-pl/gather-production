@@ -75,6 +75,29 @@ export interface Connection {
   last_error?: string;
 }
 
+export interface AgentToolCall {
+  tool: string;
+  arguments?: Record<string, unknown>;
+  ok: boolean;
+  label?: string;
+  error?: string;
+}
+
+export interface AgentHistoryMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface AgentReply {
+  answer: string;
+  tool_calls: AgentToolCall[];
+  steps: number;
+  /** True when the deterministic offline planner answered. */
+  fixture?: boolean;
+  /** True when a live model was expected but the loop degraded to local data. */
+  degraded?: boolean;
+}
+
 export interface EngineStatus {
   /** ready | running | syncing | needs_attention */
   state: string;
@@ -98,6 +121,28 @@ export interface EngineInfo {
   models: string[];
   scheduler: boolean;
   pid: number;
+}
+
+export interface SettingsSnapshot {
+  org_name: string;
+  data_dir: string;
+  chain: string[];
+  chunk_chars: number;
+  max_chunks: number;
+  min_interval_s: number;
+  max_calls_per_run: number;
+  auto_approve: boolean;
+  poll_interval_s: number;
+  sweep_interval_s: number;
+  secrets: Record<string, boolean>;
+  secrets_backend: string;
+}
+
+export interface SettingsUpdateResult {
+  updated: string[];
+  deleted: string[];
+  settings: string[];
+  restart_required?: boolean;
 }
 
 // ─── Tauri invoke import ─────────────────────────────────────────────────────
@@ -194,6 +239,27 @@ export const engine = {
 
     reject: async (proposal_id: string): Promise<{ already: boolean; status: string }> =>
       rpc("proposals.reject", { proposal_id }),
+  },
+
+  agent: {
+    chat: async (
+      message: string,
+      history: AgentHistoryMessage[] = [],
+    ): Promise<AgentReply> => rpc<AgentReply>("agent.chat", { message, history }),
+
+    tools: async (): Promise<{
+      tools: Array<{ name: string; description: string; parameters?: Record<string, unknown> }>;
+    }> => rpc("agent.tools"),
+  },
+
+  settings: {
+    get: async (): Promise<SettingsSnapshot> => rpc<SettingsSnapshot>("settings.get"),
+
+    update: async (params: {
+      secrets?: Record<string, string>;
+      settings?: Record<string, string>;
+    }): Promise<SettingsUpdateResult> =>
+      rpc<SettingsUpdateResult>("settings.update", params),
   },
 
   connections: {

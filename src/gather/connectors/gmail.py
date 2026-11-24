@@ -27,6 +27,9 @@ API = "https://gmail.googleapis.com/gmail/v1/users/me"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 _MAX_HISTORY_PAGES = 20
 _MAX_BACKFILL_PAGES = 20
+# Gmail allows 250 quota units/user/second and a message.get costs 5 units.
+# Ten calls per second keeps a backfill comfortably under the limit.
+_DEFAULT_MIN_INTERVAL_S = 0.1
 
 _QUOTE_MARKERS = (
     re.compile(r"^On .+ wrote:$", re.IGNORECASE),
@@ -55,6 +58,7 @@ class GmailConnector:
         client_secret: str | None = None,
         refresh_token: str | None = None,
         fixture_dir: Path | None = None,
+        min_interval_s: float | None = None,
     ) -> None:
         self.access_token = access_token
         self.client_id = client_id
@@ -62,6 +66,41 @@ class GmailConnector:
         self.refresh_token = refresh_token
         self.fixture_dir = fixture_dir or FIXTURE_DIR
         self._token_expires_at: float = 0
+        self.min_interval_s = (
+            float(os.environ.get("GATHER_GMAIL_MIN_INTERVAL", _DEFAULT_MIN_INTERVAL_S))
+            if min_interval_s is None
+            else max(0.0, float(min_interval_s))
+        )
+        self._next_call_at: float = 0.0
+
+    def update_credentials(
+        self,
+        *,
+        client_id: str | None,
+        client_secret: str | None,
+        refresh_token: str | None,
+    ) -> None:
+        """Apply a fresh OAuth grant without restarting the engine.
+
+        ``connections.connect("gmail")`` stores a new refresh token, but the
+        connector was built at engine start. Without this, syncs keep using
+        the old (possibly revoked) grant until the app is restarted.
+        """
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.refresh_token = refresh_token
+        self.access_token = None
+        self._token_expires_at = 0
+
+    def _pace(self) -> None:
+        """Stay under Gmail's per-user quota during a backfill burst."""
+        if self.min_interval_s <= 0:
+            return
+        now = time.monotonic()
+        if self._next_call_at > now:
+            time.sleep(self._next_call_at - now)
+            now = time.monotonic()
+        self._next_call_at = now + self.min_interval_s
 
     def _refresh_access_token(self) -> str | None:
         """Refresh the access token using the refresh token."""
@@ -74,8 +113,13 @@ class GmailConnector:
             "grant_type": "refresh_token",
         }
         response = httpx.post(TOKEN_URL, data=data, timeout=30)
+        if response.status_code == 429:
+            raise RateLimited(
+                "google oauth rate limit",
+                retry_after_s=retry_after_seconds((response.headers or {}).get("retry-after")),
+            )
         if response.status_code != 200:
-            raise AuthExpired(f"failed to refresh token: {response.text}")
+            raise AuthExpired(f"failed to refresh token: {response.text[:300]}")
         body = response.json()
         self.access_token = body["access_token"]
         expires_in = body.get("expires_in", 3600)
@@ -150,6 +194,7 @@ class GmailConnector:
             }
             if page_token:
                 params["pageToken"] = page_token
+            self._pace()
             response = httpx.get(
                 f"{API}/history",
                 headers={"Authorization": f"Bearer {token}"},
@@ -208,6 +253,7 @@ class GmailConnector:
             }
             if page_token:
                 params["pageToken"] = page_token
+            self._pace()
             response = httpx.get(
                 f"{API}/messages",
                 headers={"Authorization": f"Bearer {token}"},
@@ -244,6 +290,7 @@ class GmailConnector:
         if not token:
             return {"ok": False, "error": "no Gmail credentials configured"}
         try:
+            self._pace()
             response = httpx.get(
                 f"{API}/profile",
                 headers={"Authorization": f"Bearer {token}"},
@@ -260,6 +307,7 @@ class GmailConnector:
             return {"ok": False, "error": str(exc)[:300]}
 
     def _profile(self, token: str) -> str:
+        self._pace()
         response = httpx.get(
             f"{API}/profile",
             headers={"Authorization": f"Bearer {token}"},
@@ -303,6 +351,7 @@ class GmailConnector:
 
         messages: list[Message] = []
         if history_id:
+            self._pace()
             response = httpx.get(
                 f"{API}/history",
                 headers={"Authorization": f"Bearer {token}"},
@@ -340,6 +389,7 @@ class GmailConnector:
                 ]
             return []
 
+        self._pace()
         response = httpx.get(
             f"{API}/messages",
             headers={"Authorization": f"Bearer {token}"},
@@ -349,6 +399,7 @@ class GmailConnector:
         _check(response)
         hits: list[dict[str, Any]] = []
         for item in response.json().get("messages", [])[:limit]:
+            self._pace()
             meta = httpx.get(
                 f"{API}/messages/{item['id']}",
                 headers={"Authorization": f"Bearer {token}"},
@@ -396,6 +447,7 @@ class GmailConnector:
         if thread_id:
             payload["threadId"] = thread_id
 
+        self._pace()
         response = httpx.post(
             f"{API}/messages/send",
             headers={"Authorization": f"Bearer {token}"},
@@ -425,6 +477,7 @@ class GmailConnector:
     def _fetch_message(self, conn: Connection, message_id: str) -> Message:
         token = self._token(conn)
         assert token
+        self._pace()
         response = httpx.get(
             f"{API}/messages/{message_id}",
             headers={"Authorization": f"Bearer {token}"},
@@ -469,16 +522,77 @@ class GmailConnector:
         )
 
 
+_RATE_LIMIT_REASONS = (
+    "ratelimitexceeded",
+    "userratelimitexceeded",
+    "quotaexceeded",
+    "dailylimitexceeded",
+    "resource_exhausted",
+)
+_REAUTH_REASONS = (
+    "insufficientpermissions",
+    "access_token_scope_insufficient",
+    "permission_denied",
+)
+_API_DISABLED_REASONS = ("accessnotconfigured", "service_disabled")
+
+
+def _google_error(response: Any) -> tuple[str, str]:
+    """Extract ``(message, reasons)`` from a Google API error body."""
+    try:
+        body = response.json()
+    except Exception:  # noqa: BLE001 - HTML/proxy error pages are valid too
+        return "", ""
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        return "", ""
+    message = str(error.get("message") or "")
+    reasons: list[str] = []
+    for item in error.get("errors") or []:
+        if isinstance(item, dict) and item.get("reason"):
+            reasons.append(str(item["reason"]).lower())
+    if error.get("status"):
+        reasons.append(str(error["status"]).lower())
+    return message, ",".join(reasons)
+
+
 def _check(response: Any) -> None:
-    """Turn provider status codes into poller-level failures."""
+    """Turn provider status codes into poller-level failures.
+
+    Gmail uses **403** for several unrelated conditions: quota/rate limits,
+    missing scopes, and a disabled API all arrive this way. Classifying the
+    body gives the user an actionable message and lets the poller choose
+    between "slow down" and "reconnect".
+    """
     status = getattr(response, "status_code", 200)
+    if status < 400:
+        return
+
+    message, reasons = _google_error(response)
+    detail = message or getattr(response, "reason_phrase", "") or f"HTTP {status}"
+    headers = getattr(response, "headers", {}) or {}
+
     if status == 401:
-        raise AuthExpired("gmail credential expired or was revoked")
-    if status == 429:
-        headers = getattr(response, "headers", {}) or {}
+        raise AuthExpired(f"gmail credential expired or was revoked: {detail}")
+    if status == 429 or (status == 403 and any(reason in reasons for reason in _RATE_LIMIT_REASONS)):
         raise RateLimited(
-            "gmail rate limit", retry_after_s=retry_after_seconds(headers.get("retry-after"))
+            f"gmail rate limit: {detail}",
+            retry_after_s=retry_after_seconds(headers.get("retry-after")),
         )
+    if status == 403 and any(reason in reasons for reason in _API_DISABLED_REASONS):
+        raise SyncError(
+            "Gmail API is disabled for this Google Cloud project. "
+            "Enable it in the API Library and retry."
+        )
+    if status == 403 and any(reason in reasons for reason in _REAUTH_REASONS):
+        raise AuthExpired(
+            f"gmail permission denied: {detail}. "
+            "Reconnect Gmail from Connections and grant read access."
+        )
+    if status == 403:
+        raise SyncError(f"gmail refused the request: {detail}")
+    if message and status >= 400:
+        raise SyncError(f"gmail {status}: {detail}")
     response.raise_for_status()
 
 

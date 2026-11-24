@@ -22,6 +22,11 @@ def process_event(runtime: "Runtime", event: Event) -> None:
     if not event.org_id:
         raise ValueError("event has no workspace id")
 
+    # One event is one run; the model budget is per run, not per process.
+    llm = getattr(runtime, "llm", None)
+    if llm is not None:
+        llm.start_run()
+
     if event.kind == EventKind.MEETING_COMPLETED:
         external_id = event.subject.id if event.subject else event.payload.get("meeting_id")
         if not external_id:
