@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import json
 import os
-import select
+import queue
 import subprocess
 import sys
+import threading
 import time
 from datetime import date, timedelta
 from pathlib import Path
@@ -139,6 +140,17 @@ def test_apply_stored_settings_overlays_non_secret_values(tmp_path):
     assert updated.auto_approve is True
 
 
+def test_onboarding_state_is_read_from_the_secret_store(tmp_path):
+    settings = load_settings(data_dir=tmp_path)
+    store = FileSecretStore(tmp_path / "secrets.json")
+    store.set("GATHER_ONBOARDED", "1")
+    updated = apply_stored_settings(settings, store)
+    assert updated.onboarded is True
+    # The workspace name must never override the tenant key (org_name).
+    store.set("GATHER_ORG_NAME", "Workstation")
+    assert apply_stored_settings(settings, store).org_name == settings.org_name
+
+
 # --------------------------------------------------------------------------- #
 # Runs / cancellation / lock
 # --------------------------------------------------------------------------- #
@@ -176,6 +188,50 @@ def test_engine_lock_is_exclusive(tmp_path):
 # --------------------------------------------------------------------------- #
 # Handlers
 # --------------------------------------------------------------------------- #
+
+
+def test_onboarding_complete_persists_and_reset_clears(handlers, tmp_path, runtime):
+    status = call(handlers, "onboarding.status")
+    assert status["onboarded"] is False
+    assert status["needs_onboarding"] is True
+
+    # Existing data must stay attached to the same tenant after a workspace
+    # name is typed into onboarding.
+    connection_id = runtime.store.upsert_connection(runtime.org_id, "fireflies", mode="org")
+
+    done = call(handlers, "onboarding.complete", {"org_name": "Workstation"})
+    assert done == {"ok": True, "onboarded": True, "persisted": True}
+    assert handlers.secret_store.get("GATHER_ONBOARDED") == "1"
+    # The typed workspace label must not become the tenant key.
+    assert handlers.secret_store.get("GATHER_ORG_NAME") is None
+    assert runtime.store.get_org(runtime.org_id)["name"] != "Workstation"
+
+    # Simulate a restart: reload settings from the same data dir.
+    reloaded = apply_stored_settings(load_settings(data_dir=tmp_path), handlers.secret_store)
+    assert reloaded.onboarded is True
+    assert reloaded.org_name != "Workstation"
+    assert runtime.store.ensure_org(reloaded.org_name) == runtime.org_id
+    assert any(row["id"] == connection_id for row in runtime.store.connections(runtime.org_id, status=None))
+
+    status = call(handlers, "onboarding.status")
+    assert status["onboarded"] is True
+    assert status["needs_onboarding"] is False
+
+    reset = call(handlers, "onboarding.reset")
+    assert reset["ok"] is True
+    assert reset["onboarded"] is False
+    assert handlers.secret_store.get("GATHER_ONBOARDED") is None
+    assert handlers.secret_store.get("GATHER_ORG_NAME") is None
+    assert call(handlers, "onboarding.status")["onboarded"] is False
+
+
+def test_onboarding_status_survives_a_read_only_secret_store(runtime):
+    """A completed install must not look new just because the backend is read-only."""
+    from gather.secrets import EnvSecretStore
+
+    readonly = Handlers(runtime, events=runtime.events, secrets=EnvSecretStore(), keys={})
+    assert call(readonly, "onboarding.complete")["persisted"] is False
+    assert call(readonly, "onboarding.status")["onboarded"] is True
 
 
 def test_health_and_settings_never_expose_secret_values(handlers):
@@ -516,14 +572,22 @@ class EngineProcess:
         )
         self.events: list[dict] = []
         self._next_id = 0
+        # A reader thread avoids a classic select()/TextIOWrapper trap: extra
+        # lines can sit in the Python buffer while the raw fd reports "not
+        # ready", which looks like a hung engine even though it replied.
+        self._lines: queue.Queue[str] = queue.Queue()
+        threading.Thread(target=self._pump, name="engine-test-reader", daemon=True).start()
+
+    def _pump(self) -> None:
+        assert self.proc.stdout is not None
+        for line in self.proc.stdout:
+            self._lines.put(line)
 
     def read(self, timeout: float = 10.0) -> dict:
-        assert self.proc.stdout is not None
-        ready, _, _ = select.select([self.proc.stdout], [], [], timeout)
-        if not ready:
-            raise AssertionError("timed out waiting for the engine")
-        line = self.proc.stdout.readline()
-        assert line, "engine closed stdout"
+        try:
+            line = self._lines.get(timeout=timeout)
+        except queue.Empty:
+            raise AssertionError("timed out waiting for the engine") from None
         message = json.loads(line)  # every stdout line must be protocol JSON
         if "event" in message:
             self.events.append(message)
@@ -629,3 +693,32 @@ def test_engine_refuses_a_second_instance(tmp_path):
         os.environ.clear()
         os.environ.update(before)
         lock.release()
+
+
+def test_onboarding_survives_an_engine_restart(tmp_path):
+    """The exact desktop contract: finish onboarding, restart, stay onboarded."""
+    first = EngineProcess(tmp_path)
+    try:
+        first.wait_for(lambda message: message.get("event") == "engine.ready")
+        status = first.request("onboarding.status")["result"]
+        assert status["onboarded"] is False
+        assert status["needs_onboarding"] is True
+
+        done = first.request("onboarding.complete", {"org_name": "Workstation"})["result"]
+        assert done["onboarded"] is True
+        assert done["persisted"] is True
+    finally:
+        first.close()
+
+    second = EngineProcess(tmp_path)
+    try:
+        second.wait_for(lambda message: message.get("event") == "engine.ready")
+        status = second.request("onboarding.status")["result"]
+        assert status["onboarded"] is True
+        assert status["needs_onboarding"] is False
+
+        reset = second.request("onboarding.reset")["result"]
+        assert reset["onboarded"] is False
+        assert second.request("onboarding.status")["result"]["onboarded"] is False
+    finally:
+        second.close()

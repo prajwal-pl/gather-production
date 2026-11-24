@@ -88,7 +88,6 @@ export interface EngineStatus {
   models?: string[];
   scheduler?: { enabled?: boolean; running?: boolean; ticks?: number };
   secrets_backend?: string;
-  onboarding_status: () => Promise<{ onboarded: boolean; needs_onboarding: boolean }>;
 }
 
 export interface EngineInfo {
@@ -105,6 +104,17 @@ export interface EngineInfo {
 
 import { invoke } from "@tauri-apps/api/core";
 
+// ─── Persistent flags (file-backed, survives WebView cache clears in dev) ───────
+
+export const flags = {
+  get: (key: string): Promise<string | null> =>
+    invoke<string | null>("get_flag", { key }),
+  set: (key: string, value: string): Promise<void> =>
+    invoke<void>("set_flag", { key, value }),
+  delete: (key: string): Promise<void> =>
+    invoke<void>("delete_flag", { key }),
+};
+
 /** "all" is a UI filter concept, not a task status. */
 function statusParam(status?: string): string | null {
   if (!status || status === "all") return null;
@@ -116,6 +126,23 @@ function rpc<T>(method: string, params?: Record<string, unknown>): Promise<T> {
 }
 
 export { rpc as engineRpc };
+
+/** Bound an IPC call so a stalled engine cannot block UI indefinitely. */
+export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timed out")), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
@@ -131,11 +158,19 @@ export const engine = {
   /** Payload of the last `engine.ready` event, if one was seen. */
   info: async (): Promise<EngineInfo | null> => rpc<EngineInfo | null>("health"),
 
-  onboarding_status: async (): Promise<{ onboarded: boolean; needs_onboarding: boolean }> =>
-    rpc<{ onboarded: boolean; needs_onboarding: boolean }>("onboarding.status"),
+  onboarding_status: async (): Promise<{
+    onboarded: boolean;
+    needs_onboarding: boolean;
+    workspace?: string;
+  }> => rpc("onboarding.status"),
 
-  onboarding_complete: async (params?: { org_name?: string }): Promise<{ ok: boolean }> =>
-    rpc<{ ok: boolean }>("onboarding.complete", params ?? {}),
+  onboarding_complete: async (params?: {
+    org_name?: string;
+  }): Promise<{ ok: boolean; onboarded: boolean; persisted?: boolean }> =>
+    rpc("onboarding.complete", params ?? {}),
+
+  onboarding_reset: async (): Promise<{ ok: boolean; onboarded: boolean }> =>
+    rpc("onboarding.reset"),
 
   restart: async (): Promise<void> => { /* no-op: engine restarts are handled by the Tauri supervisor */ },
 

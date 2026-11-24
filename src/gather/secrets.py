@@ -53,7 +53,11 @@ STORED_SETTINGS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "GATHER_POLL_INTERVAL": ("poll_interval_s", float),
     "GATHER_SWEEP_INTERVAL": ("sweep_interval_s", float),
     "GATHER_ONBOARDED": ("onboarded", lambda raw: raw.strip().lower() in {"1", "true", "yes", "on"}),
-    "GATHER_ORG_NAME": ("org_name", str),
+    # NOTE: GATHER_ORG_NAME is deliberately *not* persisted here. `org_name` is
+    # the tenant key used by `Store.ensure_org`, so replaying a UI workspace
+    # name on startup would create a second organization (and hide the first
+    # one's tasks and connections). The display name lives in the shell's flag
+    # store instead.
 }
 
 

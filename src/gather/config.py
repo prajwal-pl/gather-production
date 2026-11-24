@@ -105,6 +105,9 @@ class Settings:
     poll_interval_s: float = 30.0
     sweep_interval_s: float = 6 * 60 * 60
     scheduler_enabled: bool = True
+    # Persisted in the secret/settings store (`GATHER_ONBOARDED`). This is the
+    # authoritative "first run finished" marker for the desktop shell.
+    onboarded: bool = False
 
     @property
     def live_models(self) -> tuple[ModelSpec, ...]:

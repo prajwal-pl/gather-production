@@ -2,12 +2,8 @@
  * SettingsView — API keys, model chain, theme preference, engine diagnostics.
  * Keys are write-only (secrets.set IPC); presence booleans only are shown.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
-  Key,
-  Eye,
-  EyeOff,
-  Save,
   Moon,
   Sun,
   User,
@@ -15,101 +11,8 @@ import {
   ShieldCheck,
   Cpu,
 } from "lucide-react";
-import { Badge, Button, Spinner } from "./ui";
-
-interface SecretField {
-  key: string;
-  label: string;
-  hint: string;
-  present?: boolean;
-}
-
-const SECRET_FIELDS: SecretField[] = [
-  {
-    key: "GROQ_API_KEY",
-    label: "Groq API key",
-    hint: "Free at console.groq.com — powers commitment extraction (~1.2s)",
-    present: false,
-  },
-  {
-    key: "OPENROUTER_API_KEY",
-    label: "OpenRouter API key",
-    hint: "Fallback model chain at openrouter.ai",
-    present: false,
-  },
-  {
-    key: "FIREFLIES_API_KEY",
-    label: "Fireflies API key",
-    hint: "Settings → API in your Fireflies workspace",
-    present: false,
-  },
-];
-
-function SecretRow({ field }: { field: SecretField }) {
-  const [value, setValue] = useState("");
-  const [visible, setVisible] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-
-  async function handleSave() {
-    if (!value.trim()) return;
-    setSaving(true);
-    await new Promise((r) => setTimeout(r, 300));
-    setSaving(false);
-    setSaved(true);
-    setValue("");
-    setTimeout(() => setSaved(false), 2000);
-  }
-
-  return (
-    <div className="py-3 border-b border-[oklch(var(--border))] last:border-0">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex-1">
-          <div className="flex items-center gap-2 mb-0.5">
-            <label className="text-xs font-semibold text-[oklch(var(--foreground))]">
-              {field.label}
-            </label>
-            {field.present ? (
-              <Badge variant="success">Set</Badge>
-            ) : (
-              <Badge variant="muted">Not set</Badge>
-            )}
-          </div>
-          <p className="text-[0.6875rem] text-[oklch(var(--muted-foreground))]">{field.hint}</p>
-        </div>
-      </div>
-
-      <div className="flex items-center gap-2 mt-2">
-        <div className="flex-1 relative">
-          <input
-            type={visible ? "text" : "password"}
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder={field.present ? "Enter new key to rotate…" : "Paste key here…"}
-            className="w-full h-8 px-3 pr-8 text-xs bg-[oklch(var(--background))] border border-[oklch(var(--border))] rounded-lg text-[oklch(var(--foreground))] placeholder:text-[oklch(var(--muted-foreground))] focus:outline-none focus:ring-1 focus:ring-[oklch(var(--primary))]"
-            onKeyDown={(e) => e.key === "Enter" && handleSave()}
-          />
-          <button
-            type="button"
-            onClick={() => setVisible((v) => !v)}
-            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[oklch(var(--muted-foreground))] hover:text-[oklch(var(--foreground))]"
-          >
-            {visible ? <EyeOff size={13} /> : <Eye size={13} />}
-          </button>
-        </div>
-        <Button
-          variant="outline"
-          onClick={handleSave}
-          disabled={!value.trim() || saving}
-          className="h-8 text-xs"
-        >
-          {saving ? <Spinner size={12} /> : saved ? "✓" : <Save size={12} />}
-          {saved ? "Saved" : "Save"}
-        </Button>
-      </div>
-    </div>
-  );
-}
+import { Button } from "./ui";
+import { flags } from "../engine";
 
 export function SettingsView({
   theme,
@@ -120,9 +23,33 @@ export function SettingsView({
   onToggleTheme?: () => void;
   onResetOnboarding?: () => void;
 }) {
-  const userName = localStorage.getItem("gather_user_name") || "Operator";
-  const userEmail = localStorage.getItem("gather_user_email") || "local@gather.vault";
-  const userWorkspace = localStorage.getItem("gather_workspace") || "Local Vault";
+  // Profile lives in the file-backed flag store; localStorage is only a cache.
+  const [userName, setUserName] = useState(
+    () => localStorage.getItem("gather_user_name") || "Operator",
+  );
+  const [userEmail, setUserEmail] = useState(
+    () => localStorage.getItem("gather_user_email") || "local@gather.vault",
+  );
+  const [userWorkspace, setUserWorkspace] = useState(
+    () => localStorage.getItem("gather_workspace") || "Local Vault",
+  );
+
+  useEffect(() => {
+    let active = true;
+    Promise.allSettled([
+      flags.get("user_name"),
+      flags.get("user_email"),
+      flags.get("user_workspace"),
+    ]).then(([name, email, workspace]) => {
+      if (!active) return;
+      if (name.status === "fulfilled" && name.value) setUserName(name.value);
+      if (email.status === "fulfilled" && email.value) setUserEmail(email.value);
+      if (workspace.status === "fulfilled" && workspace.value) setUserWorkspace(workspace.value);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   return (
     <div className="flex flex-col h-full bg-[oklch(var(--background))]">
@@ -221,21 +148,6 @@ export function SettingsView({
                 </button>
               </div>
             )}
-          </div>
-        </section>
-
-        {/* API Keys */}
-        <section>
-          <div className="flex items-center gap-2 mb-2.5">
-            <Key size={14} className="text-[oklch(var(--muted-foreground))]" />
-            <h3 className="text-xs font-semibold text-[oklch(var(--foreground))] uppercase tracking-wide">
-              API Credentials
-            </h3>
-          </div>
-          <div className="border border-[oklch(var(--border))] bg-[oklch(var(--card))] rounded-xl px-4 divide-y divide-[oklch(var(--border))] shadow-xs">
-            {SECRET_FIELDS.map((field) => (
-              <SecretRow key={field.key} field={field} />
-            ))}
           </div>
         </section>
 

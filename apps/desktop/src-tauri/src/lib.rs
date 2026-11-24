@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -8,6 +10,61 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::oneshot;
 
 static RPC_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+// ─── Persistent flag store (survives WebView cache clears in dev) ─────────────
+
+fn flags_path(app: &AppHandle) -> PathBuf {
+    app.path().app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("flags.json")
+}
+
+fn read_flags(app: &AppHandle) -> serde_json::Value {
+    let path = flags_path(app);
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::json!({}))
+}
+
+fn write_flags(app: &AppHandle, flags: &serde_json::Value) -> Result<(), String> {
+    let path = flags_path(app);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    let payload = serde_json::to_string_pretty(flags)
+        .map_err(|e| format!("cannot serialize flags: {e}"))?;
+    // Write through a temp file so a crash mid-write cannot corrupt the store.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, payload).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("cannot replace {}: {e}", path.display()))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_flag(key: String, app: AppHandle) -> Option<String> {
+    read_flags(&app)
+        .get(&key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+#[tauri::command]
+fn set_flag(key: String, value: String, app: AppHandle) -> Result<(), String> {
+    let mut flags = read_flags(&app);
+    flags[key] = serde_json::Value::String(value);
+    write_flags(&app, &flags)
+}
+
+#[tauri::command]
+fn delete_flag(key: String, app: AppHandle) -> Result<(), String> {
+    let mut flags = read_flags(&app);
+    if let Some(obj) = flags.as_object_mut() {
+        obj.remove(&key);
+    }
+    write_flags(&app, &flags)
+}
 
 // ─── Engine process state ────────────────────────────────────────────────────
 
@@ -210,7 +267,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Mutex::new(EngineState::new()))
-        .invoke_handler(tauri::generate_handler![engine_send, engine_rpc, engine_running, engine_diagnostics])
+        .invoke_handler(tauri::generate_handler![engine_send, engine_rpc, engine_running, engine_diagnostics, get_flag, set_flag, delete_flag])
         .setup(|app| {
             if let Err(e) = spawn_engine(app.handle()) {
                 eprintln!("[gather-desktop] engine spawn failed: {e}");

@@ -16,7 +16,7 @@ import {
   Moon,
 } from "lucide-react";
 import "./App.css";
-import { engine, type EngineStatus } from "./engine";
+import { engine, flags, withTimeout, type EngineStatus } from "./engine";
 import { InboxView } from "./components/InboxView";
 import { TasksView } from "./components/TasksView";
 import { ConnectionsView } from "./components/ConnectionsView";
@@ -45,6 +45,49 @@ const NAV: NavItem[] = [
   { id: "connections", label: "Connections", icon: <Plug size={15} /> },
   { id: "settings", label: "Settings", icon: <Settings size={15} /> },
 ];
+
+// ─── Onboarding persistence helpers ──────────────────────────────────────────
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Older builds wrote completion only to localStorage (they never told the
+ * engine). Recognise that profile so an existing install is not asked to
+ * onboard again, then migrate it to the durable stores.
+ */
+function legacyProfile(): { name: string; email: string; workspace: string } | null {
+  try {
+    const email = localStorage.getItem("gather_user_email") || "";
+    const workspace = localStorage.getItem("gather_workspace") || "";
+    const completed = localStorage.getItem("gather_onboarded") === "true";
+    if (!completed && !email && !workspace) return null;
+    return {
+      name: localStorage.getItem("gather_user_name") || "Operator",
+      email: email || "user@local",
+      workspace,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function clearOnboardingLocalStorage(): void {
+  try {
+    for (const key of [
+      "gather_onboarded",
+      "gather_user_name",
+      "gather_user_email",
+      "gather_workspace",
+      "gather_connected_apps",
+    ]) {
+      localStorage.removeItem(key);
+    }
+  } catch {
+    /* localStorage can be unavailable in hardened webviews */
+  }
+}
 
 // ─── Engine status pill ───────────────────────────────────────────────────────
 
@@ -138,8 +181,13 @@ function Sidebar({
   theme: "light" | "dark";
   onToggleTheme: () => void;
 }) {
-  const userName = localStorage.getItem("gather_user_name") || "Operator";
-  const userWorkspace = localStorage.getItem("gather_workspace") || "Local Vault";
+  const [userName, setUserName] = React.useState(localStorage.getItem("gather_user_name") || "Operator");
+  const [userWorkspace, setUserWorkspace] = React.useState(localStorage.getItem("gather_workspace") || "Local Vault");
+
+  React.useEffect(() => {
+    flags.get("user_name").then((v) => { if (v) setUserName(v); }).catch(() => {});
+    flags.get("user_workspace").then((v) => { if (v) setUserWorkspace(v); }).catch(() => {});
+  }, []);
 
   return (
     <aside className="w-[200px] flex-none flex flex-col border-r border-[oklch(var(--border))] bg-[oklch(var(--card))] h-full transition-colors duration-200">
@@ -248,27 +296,76 @@ export default function App() {
 
   // Poll engine status + onboarding state
   useEffect(() => {
+    let cancelled = false;
+
     async function checkState() {
-      try {
-        await engine.status();
-      } catch {
-        // engine starting up
-      }
-      try {
-        const ob = await engine.onboarding_status();
-        if (ob.onboarded) {
+      // 1. Fast path: the file-backed flag survives WebView cache clears and
+      // dev-server restarts. localStorage alone does not.
+      const flagValue = await withTimeout(flags.get("onboarded"), 1500).catch(() => null);
+      if (flagValue === "true") {
+        if (!cancelled) {
           setView("inbox");
-        } else {
-          setView("onboarding");
+          setLoading(false);
         }
-      } catch {
-        // fallback
-      } finally {
+        return;
+      }
+
+      // 2. Migrate an install completed by an older build (localStorage only).
+      const legacy = legacyProfile();
+      if (legacy) {
+        await Promise.allSettled([
+          withTimeout(flags.set("onboarded", "true"), 1500),
+          withTimeout(flags.set("user_name", legacy.name), 1500),
+          withTimeout(flags.set("user_email", legacy.email), 1500),
+          withTimeout(flags.set("user_workspace", legacy.workspace), 1500),
+        ]);
+        try {
+          localStorage.setItem("gather_onboarded", "true");
+        } catch {
+          /* best effort legacy marker */
+        }
+        engine
+          .onboarding_complete({ org_name: legacy.workspace || undefined })
+          .catch(() => {});
+        if (!cancelled) {
+          setView("inbox");
+          setLoading(false);
+        }
+        return;
+      }
+
+      // 3. Ask the engine. It may still be booting, so retry briefly instead
+      // of mis-reporting an onboarded user as new. Each attempt is bounded so
+      // a wedged engine cannot leave the app on the splash screen forever.
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        if (cancelled) return;
+        try {
+          const ob = await withTimeout(engine.onboarding_status(), 1200);
+          if (ob.onboarded) {
+            await withTimeout(flags.set("onboarded", "true"), 1500).catch(() => {});
+            if (!cancelled) setView("inbox");
+          } else {
+            if (!cancelled) setView("onboarding");
+          }
+          if (!cancelled) setLoading(false);
+          return;
+        } catch {
+          await sleep(250 + attempt * 150);
+        }
+      }
+
+      // Engine never answered: show onboarding, but keep the flag check above
+      // as the primary path for existing users.
+      if (!cancelled) {
+        setView("onboarding");
         setLoading(false);
       }
     }
 
     checkState();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (loading) {
@@ -307,6 +404,17 @@ export default function App() {
     );
   }
 
+  const resetOnboarding = async () => {
+    // Clear every place completion could be cached, including the engine
+    // marker, otherwise the next launch would skip onboarding again.
+    clearOnboardingLocalStorage();
+    await Promise.allSettled([
+      withTimeout(flags.delete("onboarded"), 2000),
+      withTimeout(engine.onboarding_reset(), 2000),
+    ]);
+    setView("onboarding");
+  };
+
   const content: Record<View, React.ReactNode> = {
     inbox: <InboxView />,
     tasks: <TasksView />,
@@ -315,7 +423,7 @@ export default function App() {
       <SettingsView
         theme={theme}
         onToggleTheme={toggleTheme}
-        onResetOnboarding={() => setView("onboarding")}
+        onResetOnboarding={resetOnboarding}
       />
     ),
     onboarding: <OnboardingView onComplete={() => setView("inbox")} />,

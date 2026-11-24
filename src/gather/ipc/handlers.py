@@ -34,6 +34,7 @@ from ..secrets import (
     SECRET_KEYS,
     STORED_SETTINGS,
     SecretStore,
+    SecretStoreError,
     secret_presence,
 )
 from .protocol import RpcError
@@ -98,6 +99,8 @@ class Handlers:
         self._shutdown = shutdown or (lambda: None)
         self.log = log or (lambda _message: None)
         self._decision_lock = threading.Lock()
+        # In-process override used when the secret backend is read-only.
+        self._onboarded_override: bool | None = None
 
     # -- registration ------------------------------------------------------ #
 
@@ -136,6 +139,7 @@ class Handlers:
         # ─── onboarding ───────────────────────────────────────────────── #
         router.register("onboarding.status", self.onboarding_status)
         router.register("onboarding.complete", self.onboarding_complete)
+        router.register("onboarding.reset", self.onboarding_reset)
 
         # ─── connections.connect (slow: OAuth flow, API key exchange) ─── #
         router.register("connections.connect", self.connections_connect, slow=True)
@@ -425,11 +429,32 @@ class Handlers:
         return payload
 
     def onboarding_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Report the persisted first-run state.
+
+        The secret store is authoritative; ``settings.onboarded`` mirrors a
+        stored ``GATHER_ONBOARDED`` value (useful when the secret backend is
+        temporarily unreadable), and the environment is the CLI escape hatch.
+        """
         store = self.secret_store
-        onboarded_raw = store.get("GATHER_ONBOARDED") if store is not None else None
-        onboarded = onboarded_raw is not None and onboarded_raw.strip().lower() in {
-            "1", "true", "yes", "on"
-        }
+        try:
+            onboarded_raw = store.get("GATHER_ONBOARDED") if store is not None else None
+        except SecretStoreError:
+            # A locked keychain must not make an existing install look new.
+            onboarded_raw = None
+        if onboarded_raw is None:
+            onboarded_raw = os.environ.get("GATHER_ONBOARDED")
+        onboarded = (
+            onboarded_raw is not None
+            and onboarded_raw.strip().lower() in {"1", "true", "yes", "on"}
+        )
+        onboarded = onboarded or bool(getattr(self.runtime.settings, "onboarded", False))
+        if self._onboarded_override is not None:
+            onboarded = self._onboarded_override
+
+        # The tenant actually in use, not a UI label. The shell keeps the
+        # user-facing workspace name in its own flag store.
+        org_name = self.runtime.settings.org_name or os.environ.get("GATHER_ORG_NAME")
+
         conn_rows = self.runtime.store.connections(self.org, status=None)
         connections = len(conn_rows) if conn_rows else 0
         live_models = tuple(
@@ -440,20 +465,36 @@ class Handlers:
             "ok": True,
             "onboarded": onboarded,
             "needs_onboarding": not onboarded,
+            "workspace": org_name,
             "connections": connections,
             "model_configured": len(live_models) > 0,
         }
 
     def onboarding_complete(self, params: dict[str, Any]) -> dict[str, Any]:
         store = self.secret_store
-        if store is not None and store.writable:
+        writable = store is not None and store.writable
+        if writable:
             store.set("GATHER_ONBOARDED", "1")
-        # Persist org_name if provided
-        org_name = params.get("org_name")
-        if org_name and store is not None and store.writable:
-            store.set("GATHER_ORG_NAME", str(org_name))
+            # Older builds also stored the typed workspace name as
+            # GATHER_ORG_NAME. That value feeds `ensure_org` on the next start
+            # and would fork the tenant, so repair it on the way through.
+            store.delete("GATHER_ORG_NAME")
+        # Keep status coherent for the rest of this process even when the
+        # backend is read-only (e.g. ``--secrets env`` in dev).
+        self._onboarded_override = True
         self._emit("onboarding.completed", {"at": _timestamp()})
-        return {"ok": True, "onboarded": True}
+        return {"ok": True, "onboarded": True, "persisted": writable}
+
+    def onboarding_reset(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Clear the first-run marker so the shell shows onboarding again."""
+        store = self.secret_store
+        writable = store is not None and store.writable
+        if writable:
+            store.delete("GATHER_ONBOARDED")
+            store.delete("GATHER_ORG_NAME")
+        self._onboarded_override = False
+        self._emit("onboarding.reset", {"at": _timestamp()})
+        return {"ok": True, "onboarded": False, "persisted": writable}
 
     def connections_connect(self, params: dict[str, Any]) -> dict[str, Any]:
         """Connect a provider.

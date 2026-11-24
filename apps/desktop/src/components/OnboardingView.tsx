@@ -27,7 +27,7 @@ import {
   Cpu,
 } from "lucide-react";
 import { Badge, Button, Spinner } from "./ui";
-import { engine } from "../engine";
+import { engine, flags, withTimeout } from "../engine";
 
 export interface OnboardingData {
   name: string;
@@ -129,6 +129,10 @@ export function OnboardingView({ onComplete }: { onComplete: () => void }) {
   // AI preferences
   const [useFixtureAi, setUseFixtureAi] = useState<boolean>(true);
 
+  // Completion state
+  const [finishing, setFinishing] = useState<boolean>(false);
+  const [finishError, setFinishError] = useState<string | null>(null);
+
   // Toggle app selection
   const toggleApp = (id: string) => {
     setSelectedApps((prev) =>
@@ -161,12 +165,61 @@ export function OnboardingView({ onComplete }: { onComplete: () => void }) {
   };
 
   // Complete onboarding
-  const handleFinish = () => {
-    localStorage.setItem("gather_user_name", name.trim() || "Operator");
-    localStorage.setItem("gather_user_email", email.trim() || "user@local");
-    localStorage.setItem("gather_workspace", workspace.trim() || `${name.trim() || "Local"}'s Workspace`);
-    localStorage.setItem("gather_onboarded", "true");
-    localStorage.setItem("gather_connected_apps", JSON.stringify(selectedApps));
+  const handleFinish = async () => {
+    if (finishing) return;
+    setFinishing(true);
+    setFinishError(null);
+
+    const resolvedName = name.trim() || "Operator";
+    const resolvedEmail = email.trim() || "user@local";
+    const resolvedWorkspace = workspace.trim() || `${resolvedName}'s Workspace`;
+
+    // The engine marker is authoritative. It lives in the OS keychain (or the
+    // 0600 secrets file) next to the rest of the workspace state, so it is what
+    // makes onboarding survive a full app/engine restart.
+    let enginePersisted = false;
+    try {
+      const result = await withTimeout(
+        engine.onboarding_complete({ org_name: resolvedWorkspace }),
+        5000,
+      );
+      enginePersisted = result.persisted !== false;
+    } catch (err) {
+      console.warn("engine could not persist onboarding:", err);
+    }
+
+    // A file-backed flag is the second line of defence (engine down, keychain
+    // locked, or dev server restarted before the RPC completed).
+    const flagPersisted = await withTimeout(flags.set("onboarded", "true"), 5000)
+      .then(() => true)
+      .catch(() => false);
+
+    if (!enginePersisted && !flagPersisted) {
+      setFinishing(false);
+      setFinishError(
+        "Could not save your setup to disk. Check the engine diagnostics and try again.",
+      );
+      return;
+    }
+
+    // Profile details are convenience state; never block completion on them.
+    await Promise.allSettled([
+      withTimeout(flags.set("user_name", resolvedName), 5000),
+      withTimeout(flags.set("user_email", resolvedEmail), 5000),
+      withTimeout(flags.set("user_workspace", resolvedWorkspace), 5000),
+    ]);
+
+    // Keep an in-session WebView cache too, but never depend on it.
+    try {
+      localStorage.setItem("gather_user_name", resolvedName);
+      localStorage.setItem("gather_user_email", resolvedEmail);
+      localStorage.setItem("gather_workspace", resolvedWorkspace);
+      localStorage.setItem("gather_onboarded", "true");
+      localStorage.setItem("gather_connected_apps", JSON.stringify(selectedApps));
+    } catch {
+      /* localStorage is optional */
+    }
+
     onComplete();
   };
 
@@ -778,13 +831,29 @@ export function OnboardingView({ onComplete }: { onComplete: () => void }) {
               </div>
             </div>
 
+            {finishError && (
+              <p className="text-xs text-[oklch(var(--destructive))] mb-3">
+                {finishError}
+              </p>
+            )}
+
             <Button
               variant="primary"
               onClick={handleFinish}
+              disabled={finishing}
               className="w-full h-10 text-sm gap-2 font-semibold shadow-md"
             >
-              <span>Enter gather Workspace</span>
-              <ArrowRight size={16} />
+              {finishing ? (
+                <>
+                  <Spinner size={14} />
+                  <span>Saving your workspace…</span>
+                </>
+              ) : (
+                <>
+                  <span>Enter gather Workspace</span>
+                  <ArrowRight size={16} />
+                </>
+              )}
             </Button>
           </div>
         )}
